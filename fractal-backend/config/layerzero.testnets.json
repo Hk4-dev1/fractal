@@ -1,0 +1,22 @@
+{
+  "ethereum-sepolia": {
+    "eid": 40161,
+    "endpointV2": "0x6EDCE65403992e310A62460808c4b910D972f10f",
+    "rpcEnv": "ETH_SEPOLIA_RPC_URL"
+  },
+  "arbitrum-sepolia": {
+    "eid": 40243,
+    "endpointV2": "0x6EDCE65403992e310A62460808c4b910D972f10f",
+    "rpcEnv": "ARB_SEPOLIA_RPC_URL"
+  },
+  "optimism-sepolia": {
+    "eid": 40232,
+    "endpointV2": "0x6EDCE65403992e310A62460808c4b910D972f10f",
+    "rpcEnv": "OP_SEPOLIA_RPC_URL"
+  },
+  "base-sepolia": {
+    "eid": 40245,
+    "endpointV2": "0x6EDCE65403992e310A62460808c4b910D972f10f",
+    "rpcEnv": "BASE_SEPOLIA_RPC_URL"
+  }
+}

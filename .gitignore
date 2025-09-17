@@ -1,0 +1,36 @@
+# Node
+node_modules/
+*.log
+
+# Env
+.env
+**/.env
+!.env.example
+!.env.v2.example
+.env.local
+**/.env.local
+!.env.security.example
+*.env
+**/*.env
+
+# Builds
+**/dist/
+**/build/
+**/.turbo/
+**/.next/
+**/coverage/
+
+# Hardhat artifacts
+**/artifacts/
+**/cache/
+**/typechain-types/
+
+# OS and misc
+.DS_Store
+*.swp
+*.swo
+
+# Lockfiles (optional)
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
