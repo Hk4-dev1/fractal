@@ -22,9 +22,9 @@ jobs:
         working-directory: fractal-backend
         run: npm install --no-audit --no-fund --legacy-peer-deps --silent
 
-      - name: Build wiring script
+      - name: Build wiring script (no tsconfig)
         working-directory: fractal-backend
-        run: npx tsc -p tsconfig.json
+        run: npx tsc scripts/check-wiring.ts --outDir dist --module commonjs --target es2020 --esModuleInterop --skipLibCheck --moduleResolution node --types node
 
       - name: Copy config for runtime
         working-directory: fractal-backend
