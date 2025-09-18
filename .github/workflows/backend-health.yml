@@ -23,6 +23,15 @@ jobs:
         working-directory: fractal-backend
         run: npm ci --silent || npm install
 
+      - name: Debug env presence (no values)
+        shell: bash
+        run: |
+          echo "ETH_SEPOLIA_RPC_URL set: ${{ secrets.ETH_SEPOLIA_RPC_URL != '' }}"
+          echo "ARB_SEPOLIA_RPC_URL set: ${{ secrets.ARB_SEPOLIA_RPC_URL != '' }}"
+          echo "OP_SEPOLIA_RPC_URL set:  ${{ secrets.OP_SEPOLIA_RPC_URL != '' }}"
+          echo "BASE_SEPOLIA_RPC_URL set: ${{ secrets.BASE_SEPOLIA_RPC_URL != '' }}"
+          echo "Will run check with routers configured in workflow env."
+
       - name: Check wiring
         working-directory: fractal-backend
         env:
