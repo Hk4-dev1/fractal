@@ -20,7 +20,10 @@ jobs:
 
       - name: Install deps
         working-directory: fractal-backend
-        run: npm ci --silent || npm install
+        env:
+          NPM_CONFIG_LEGACY_PEER_DEPS: "true"
+        run: |
+          npm ci --no-audit --no-fund --silent || npm install --no-audit --no-fund --legacy-peer-deps
 
       - name: Debug env presence (no values)
         shell: bash
