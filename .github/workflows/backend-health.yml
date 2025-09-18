@@ -22,6 +22,14 @@ jobs:
         working-directory: fractal-backend
         run: npm install --no-audit --no-fund --legacy-peer-deps --silent
 
+      - name: Build wiring script
+        working-directory: fractal-backend
+        run: npx tsc -p tsconfig.json
+
+      - name: Copy config for runtime
+        working-directory: fractal-backend
+        run: mkdir -p dist && cp -r config dist/
+
       - name: Debug env presence (no values)
         shell: bash
         run: |
@@ -48,4 +56,4 @@ jobs:
           ROUTERV2_ARB_SEPOLIA: "0x3D1D6bc8D8Af01Bff8751b03636c317e3B464b0D"
           ROUTERV2_OP_SEPOLIA: "0x005D2E2fcDbA0740725E848cc1bCc019823f118C"
           ROUTERV2_BASE_SEPOLIA: "0x68bAB827101cD4C55d9994bc738f2ED8FfAB974F"
-        run: npx ts-node scripts/check-wiring.ts
+        run: node dist/scripts/check-wiring.js
