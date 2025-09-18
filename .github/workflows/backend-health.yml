@@ -1,0 +1,43 @@
+name: Backend Health
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+jobs:
+  wiring-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: fractal-backend/package-lock.json
+
+      - name: Install deps
+        working-directory: fractal-backend
+        run: npm ci --silent || npm install
+
+      - name: Check wiring
+        working-directory: fractal-backend
+        env:
+          ETH_SEPOLIA_RPC_URL: ${{ secrets.ETH_SEPOLIA_RPC_URL }}
+          ARB_SEPOLIA_RPC_URL: ${{ secrets.ARB_SEPOLIA_RPC_URL }}
+          OP_SEPOLIA_RPC_URL: ${{ secrets.OP_SEPOLIA_RPC_URL }}
+          BASE_SEPOLIA_RPC_URL: ${{ secrets.BASE_SEPOLIA_RPC_URL }}
+          # PRIVATE_KEY not required for read-only checks
+          PRIVATE_KEY: 0x0000000000000000000000000000000000000000000000000000000000000001
+          ESCROW_ETH_SEPOLIA: 0xb04057fD0dAF231A16BE26a566F762b24D602816
+          ESCROW_ARB_SEPOLIA: 0x02f93dcCF6F93D170c622AE391315c2e90a1e628
+          ESCROW_OP_SEPOLIA: 0x238a9a6A716B393C5B93EA52B1D99d0283212157
+          ESCROW_BASE_SEPOLIA: 0x83d705e272dDc2811CE87CD35b0Ec4bA52cF3D23
+          ROUTERV2_ETH_SEPOLIA: 0xb77078E1d22F9390441C84ab0C00f656311b224e
+          ROUTERV2_ARB_SEPOLIA: 0x3D1D6bc8D8Af01Bff8751b03636c317e3B464b0D
+          ROUTERV2_OP_SEPOLIA: 0x005D2E2fcDbA0740725E848cc1bCc019823f118C
+          ROUTERV2_BASE_SEPOLIA: 0x68bAB827101cD4C55d9994bc738f2ED8FfAB974F
+        run: npx ts-node scripts/check-wiring.ts
