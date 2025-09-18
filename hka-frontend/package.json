@@ -25,7 +25,8 @@
     "pools:bootstrap:weth": "node scripts/bootstrap-weth-pools.mjs",
     "amm:setup-seed": "node scripts/amm-setup-seed.mjs",
     "amm:owner-calldata": "node scripts/amm-owner-calldata.mjs",
-    "probe:amm": "node scripts/probe-amm.mjs"
+    "probe:amm": "node scripts/probe-amm.mjs",
+    "set:gh-secrets": "bash ../scripts/set-gh-secrets-from-env.sh Hk4-dev1/fractal"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.3.2",

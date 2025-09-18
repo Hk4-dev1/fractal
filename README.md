@@ -32,6 +32,14 @@ gh secret set OP_SEPOLIA_RPC_URL  -b "https://optimism-sepolia.infura.io/v3/<KEY
 gh secret set BASE_SEPOLIA_RPC_URL -b "https://base-sepolia.infura.io/v3/<KEY>"
 ```
 
+## One-liner to set GitHub RPC secrets
+
+Requires GitHub CLI logged in and your RPCs present in `hka-frontend/.env` under either VITE_RPC_* or RPC_*.
+
+```sh
+cd hka-frontend && npm run set:gh-secrets
+```
+
 ### Triggering the health check
 - Manually: Actions → Backend Health → Run workflow
 - On schedule: runs every hour (cron: `0 * * * *`)
