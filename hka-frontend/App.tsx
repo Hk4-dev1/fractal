@@ -15,6 +15,7 @@ const SpotTradingNew = lazy(() => import('./components/SpotTradingNew').then(m =
 const PerpetualFutures = lazy(() => import('./components/PerpetualFutures').then(m => ({ default: m.PerpetualFutures })));
 const Portfolio = lazy(() => import('./components/Portfolio').then(m => ({ default: m.Portfolio })));
 const NotificationCenter = lazy(() => import('./components/NotificationCenter').then(m => ({ default: m.NotificationCenter })));
+const Health = lazy(() => import('./components/Health').then(m => ({ default: m.Health })));
 import { useIsMobile } from './components/ui/use-mobile';
 const ToasterLazy = lazy(() => import('sonner').then(m => ({ default: m.Toaster })));
 
@@ -95,6 +96,8 @@ function App() {
         return <PerpetualFutures />;
       case 'portfolio':
         return <Portfolio />;
+      case 'health':
+        return <Health />;
       default:
         return <Homepage />;
     }

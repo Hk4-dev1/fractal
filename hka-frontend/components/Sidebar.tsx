@@ -19,6 +19,7 @@ export function Sidebar({ activeSection, setActiveSection }: SidebarProps) {
     { id: 'homepage', label: 'Overview', icon: Home, count: 0 },
   { id: 'spot', label: 'Swap', icon: ArrowUpDown, count: 0, description: 'Spot & Cross-Chain' },
   { id: 'crosschain', label: 'Swap (Alt)', icon: Network, count: 0, description: 'Same UI' },
+  { id: 'health', label: 'Health', icon: Network, count: 0, description: 'Wiring status' },
     { id: 'futures', label: 'Futures', icon: Zap, count: 0, description: 'Perpetual Futures' },
     { id: 'portfolio', label: 'Portfolio', icon: User, count: 0 }
   ];
@@ -38,6 +39,9 @@ export function Sidebar({ activeSection, setActiveSection }: SidebarProps) {
         break;
       case 'portfolio':
         import('../components/Portfolio');
+        break;
+      case 'health':
+        import('../components/Health');
         break;
       default:
         break;
