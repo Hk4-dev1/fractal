@@ -2,7 +2,7 @@
 export const CONTRACTS = {
   11155111: { // Ethereum Sepolia
     name: 'Ethereum Sepolia',
-  rpc: import.meta.env?.VITE_RPC_ETHEREUM_SEPOLIA,
+  rpc: 'https://eth-sepolia.public.blastapi.io',
     explorer: 'https://sepolia.etherscan.io',
     testETH: '0xdc1DCA3041ec84d72cCDC3a761B080451AB350AD',
     testUSDC: '0x787a258717489a07a537d1377A0ee14767BB53c4',
@@ -15,7 +15,7 @@ export const CONTRACTS = {
   },
   421614: { // Arbitrum Sepolia  
     name: 'Arbitrum Sepolia',
-  rpc: import.meta.env?.VITE_RPC_ARBITRUM_SEPOLIA,
+  rpc: 'https://sepolia-rollup.arbitrum.io/rpc',
     explorer: 'https://sepolia.arbiscan.io',
     testETH: '0xcfa48E2daed3aC8177B752c6825aF47C8c555A79',
     testUSDC: '0xE6fD94A1C5200A1104019EaB7116672C70d55e43',
@@ -28,7 +28,7 @@ export const CONTRACTS = {
   },
   11155420: { // Optimism Sepolia
     name: 'Optimism Sepolia', 
-  rpc: import.meta.env?.VITE_RPC_OPTIMISM_SEPOLIA,
+  rpc: 'https://sepolia.optimism.io',
     explorer: 'https://sepolia-optimism.etherscan.io',
     testETH: '0xE6fD94A1C5200A1104019EaB7116672C70d55e43',
     testUSDC: '0x47C67616E56f7aBb0aE021e7F4d1E0D9058CEC13',
@@ -41,7 +41,7 @@ export const CONTRACTS = {
   },
   84532: { // Base Sepolia
     name: 'Base Sepolia',
-  rpc: import.meta.env?.VITE_RPC_BASE_SEPOLIA, 
+  rpc: 'https://sepolia.base.org', 
     explorer: 'https://sepolia.basescan.org',
     testETH: '0xcfa48E2daed3aC8177B752c6825aF47C8c555A79',
     testUSDC: '0xE6fD94A1C5200A1104019EaB7116672C70d55e43',

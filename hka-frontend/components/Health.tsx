@@ -22,11 +22,8 @@ export function Health() {
       const out: Row[] = [];
       try {
         for (const e of WIRING_ENTRIES) {
-          const rpc = (import.meta as any).env?.[e.rpcEnv] as string | undefined;
-          if (!rpc) {
-            out.push({ name: e.name, router: e.router, endpointOk: false, error: `Missing ${e.rpcEnv}` });
-            continue;
-          }
+          const envRpc = (import.meta as any).env?.[e.rpcEnv] as string | undefined;
+          const rpc = envRpc && envRpc.trim().length > 0 ? envRpc : (e as any).defaultRpc;
           const provider = new ethers.JsonRpcProvider(rpc);
           const routerAbi = ["function endpoint() view returns (address)", "function peers(uint64) view returns (bytes32)"];
           const escrowAbi = ["function router() view returns (address)"];

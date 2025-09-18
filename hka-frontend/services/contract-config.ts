@@ -5,7 +5,7 @@ export const NETWORKS = {
   ETHEREUM_SEPOLIA: {
     chainId: 11155111,
     name: 'Ethereum Sepolia',
-  rpcUrl: import.meta.env?.VITE_RPC_ETHEREUM_SEPOLIA,
+  rpcUrl: 'https://eth-sepolia.public.blastapi.io',
     blockExplorer: 'https://sepolia.etherscan.io',
     contracts: {
       testETH: '0xdc1DCA3041ec84d72cCDC3a761B080451AB350AD',
@@ -17,7 +17,7 @@ export const NETWORKS = {
   ARBITRUM_SEPOLIA: {
     chainId: 421614,
     name: 'Arbitrum Sepolia',
-  rpcUrl: import.meta.env?.VITE_RPC_ARBITRUM_SEPOLIA,
+  rpcUrl: 'https://sepolia-rollup.arbitrum.io/rpc',
     blockExplorer: 'https://sepolia.arbiscan.io',
     contracts: {
       testETH: '0xcfa48E2daed3aC8177B752c6825aF47C8c555A79',
@@ -29,7 +29,7 @@ export const NETWORKS = {
   OPTIMISM_SEPOLIA: {
     chainId: 11155420,
     name: 'Optimism Sepolia',
-  rpcUrl: import.meta.env?.VITE_RPC_OPTIMISM_SEPOLIA,
+  rpcUrl: 'https://sepolia.optimism.io',
     blockExplorer: 'https://sepolia-optimism.etherscan.io',
     contracts: {
       testETH: '0xE6fD94A1C5200A1104019EaB7116672C70d55e43',
@@ -41,7 +41,7 @@ export const NETWORKS = {
   BASE_SEPOLIA: {
     chainId: 84532,
     name: 'Base Sepolia',
-  rpcUrl: import.meta.env?.VITE_RPC_BASE_SEPOLIA,
+  rpcUrl: 'https://sepolia.base.org',
     blockExplorer: 'https://sepolia.basescan.org',
     contracts: {
       testETH: '0xcfa48E2daed3aC8177B752c6825aF47C8c555A79',
