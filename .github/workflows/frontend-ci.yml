@@ -26,16 +26,10 @@ jobs:
           # cache disabled to avoid path resolution issues (no lockfile)
 
       - name: Install deps
-        run: |
-          cd hka-frontend
-          npm install --no-audit --no-fund --legacy-peer-deps --silent
+        run: npm --prefix hka-frontend install --no-audit --no-fund --legacy-peer-deps --silent
 
       - name: Type check
-        run: |
-          cd hka-frontend
-          npx tsc -p . --noEmit --pretty false
+        run: node hka-frontend/node_modules/typescript/bin/tsc -p hka-frontend/tsconfig.json --noEmit --pretty false
 
       - name: Build
-        run: |
-          cd hka-frontend
-          npm run build
+        run: npm --prefix hka-frontend run build
