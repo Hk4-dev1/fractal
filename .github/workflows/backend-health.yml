@@ -12,6 +12,10 @@ on:
 
 jobs:
   wiring-check:
+    timeout-minutes: 10
+    concurrency:
+      group: backend-health-${{ github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

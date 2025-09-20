@@ -1,5 +1,7 @@
 # Fractal Monorepo
 
+[![Backend Health](https://github.com/Hk4-dev1/fractal/actions/workflows/backend-health.yml/badge.svg)](https://github.com/Hk4-dev1/fractal/actions/workflows/backend-health.yml)
+
 This repo contains:
 - fractal-backend: LayerZero v2 wiring scripts and health checks
 - hka-frontend: React/Vite UI with public RPC defaults and a Health page
