@@ -29,7 +29,8 @@ jobs:
         run: npm --prefix hka-frontend install --no-audit --no-fund --legacy-peer-deps --silent
 
       - name: Type check
-        run: node hka-frontend/node_modules/typescript/bin/tsc -p hka-frontend/tsconfig.json --noEmit --pretty false
+        run: |
+          node "$GITHUB_WORKSPACE/hka-frontend/node_modules/typescript/bin/tsc" -p "$GITHUB_WORKSPACE/hka-frontend/tsconfig.json" --noEmit --pretty false
 
       - name: Build
         run: npm --prefix hka-frontend run build
