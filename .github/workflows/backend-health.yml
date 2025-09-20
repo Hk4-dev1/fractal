@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '0 * * * *'
   workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'fractal-backend/**'
+      - '.github/workflows/backend-health.yml'
 
 jobs:
   wiring-check:
@@ -38,6 +43,11 @@ jobs:
           echo "OP_SEPOLIA_RPC_URL set:  ${{ secrets.OP_SEPOLIA_RPC_URL != '' }}"
           echo "BASE_SEPOLIA_RPC_URL set: ${{ secrets.BASE_SEPOLIA_RPC_URL != '' }}"
           echo "Will run check with routers configured in workflow env."
+      - name: Debug context
+        run: |
+          echo "event_name=${{ github.event_name }}"
+          echo "ref=${{ github.ref }}"
+          echo "sha=${{ github.sha }}"
 
       - name: Check wiring
         working-directory: fractal-backend
