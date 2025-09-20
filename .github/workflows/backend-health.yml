@@ -21,7 +21,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          # caching disabled to avoid path resolution issues
 
       - name: Install deps
         working-directory: fractal-backend
@@ -43,6 +42,7 @@ jobs:
           echo "OP_SEPOLIA_RPC_URL set:  ${{ secrets.OP_SEPOLIA_RPC_URL != '' }}"
           echo "BASE_SEPOLIA_RPC_URL set: ${{ secrets.BASE_SEPOLIA_RPC_URL != '' }}"
           echo "Will run check with routers configured in workflow env."
+
       - name: Debug context
         run: |
           echo "event_name=${{ github.event_name }}"
@@ -66,4 +66,7 @@ jobs:
           ROUTERV2_ARB_SEPOLIA: "0x3D1D6bc8D8Af01Bff8751b03636c317e3B464b0D"
           ROUTERV2_OP_SEPOLIA: "0x005D2E2fcDbA0740725E848cc1bCc019823f118C"
           ROUTERV2_BASE_SEPOLIA: "0x68bAB827101cD4C55d9994bc738f2ED8FfAB974F"
-  run: node dist/check-wiring.js
+        run: node dist/check-wiring.js
+
+
+
