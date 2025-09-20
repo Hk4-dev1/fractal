@@ -33,7 +33,7 @@ jobs:
       - name: Type check
         run: |
           cd hka-frontend
-          npx tsc -p ./tsconfig.json --noEmit --pretty false
+          npx tsc -p . --noEmit --pretty false
 
       - name: Build
         run: |
