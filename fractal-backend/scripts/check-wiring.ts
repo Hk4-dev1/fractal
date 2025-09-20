@@ -72,18 +72,44 @@ async function main() {
     ]
   };
 
-  const contexts = entries.map((e): Ctx | undefined => {
+  const expectedChainId: Record<string, number> = {
+    "ethereum-sepolia": 11155111,
+    "arbitrum-sepolia": 421614,
+    "optimism-sepolia": 11155420,
+    "base-sepolia": 84532,
+  };
+
+  async function selectProvider(urls: string[], wantChainId?: number): Promise<ethers.AbstractProvider> {
+    const cleaned = urls.filter(Boolean);
+    for (const u of cleaned) {
+      const p = new ethers.JsonRpcProvider(u);
+      try {
+        const net = await callWithRetry(() => p.getNetwork(), `getNetwork(${new URL(u).hostname})`, 2);
+        if (!wantChainId || Number(net.chainId) === Number(wantChainId)) {
+          return p;
+        }
+      } catch (_e) {
+        // try next
+      }
+    }
+    // fallback: return first provider; may still succeed for simple calls
+    return new ethers.JsonRpcProvider(cleaned[0]);
+  }
+
+  // Build contexts asynchronously to allow provider selection
+  const ctxPromises = entries.map(async (e): Promise<Ctx | undefined> => {
     const primary = process.env[e.rpcEnv];
     const router = process.env[e.routerEnv];
     const escrow = process.env[e.escrowEnv];
     if (!primary || !router) return undefined; // skip if missing
     const urls = [primary, ...(backupRpcs[e.chainKey] || [])];
-    const providers = urls.filter(Boolean).map((u) => new ethers.JsonRpcProvider(u));
-    const provider = providers.length === 1 ? providers[0] : new ethers.FallbackProvider(providers, 1);
+    const provider = await selectProvider(urls, expectedChainId[e.chainKey]);
     const eid: number = cfg[e.chainKey]?.eid;
     const endpointV2: string = cfg[e.chainKey]?.endpointV2;
     return { chainKey: e.chainKey, router, escrow, provider, eid, endpointV2 };
-  }).filter((x): x is Ctx => !!x);
+  });
+
+  const contexts = (await Promise.all(ctxPromises)).filter((x): x is Ctx => !!x);
 
   if (contexts.length < 2) throw new Error("Need at least two routers set in env to check wiring");
 
