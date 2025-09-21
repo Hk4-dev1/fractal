@@ -31,13 +31,6 @@ jobs:
       - name: Install deps
         run: npm install --no-audit --no-fund --legacy-peer-deps --silent
 
-      - name: Debug workspace
-        run: |
-          echo "PWD: $(pwd)"
-          ls -la
-          echo "tsconfig.json (stat):" && stat tsconfig.json || true
-          echo "First lines of tsconfig.json:" && head -n 20 tsconfig.json || true
-
       - name: Type check
         run: |
           ls -la
