@@ -91,7 +91,7 @@ jobs:
     name: Deploy to GitHub Pages
     needs: [build, preflight-pages]
     runs-on: ubuntu-latest
-  if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.preflight-pages.outputs.enabled == 'true'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.preflight-pages.outputs.enabled == 'true'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
