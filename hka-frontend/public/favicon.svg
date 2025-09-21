@@ -1,0 +1,15 @@
+<!-- HKA DEX favicon derived from logo/HKA-LOGO.svg -->
+<!-- Simplified inline to keep size small; uses the same asset path semantics for Vite/public -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" aria-hidden="true" focusable="false">
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3B82F6"/>
+      <stop offset="100%" stop-color="#0EA5E9"/>
+    </linearGradient>
+  </defs>
+  <rect rx="56" ry="56" x="8" y="8" width="240" height="240" fill="url(#g)"/>
+  <g fill="#fff">
+    <path d="M60 176V80h20v36h36V80h20v96h-20v-40H80v40H60z"/>
+    <path d="M196 80c11 0 20 9 20 20s-9 20-20 20-20-9-20-20 9-20 20-20zm0 52c-22 0-40 18-40 40h20c0-11 9-20 20-20s20 9 20 20h20c0-22-18-40-40-40z"/>
+  </g>
+</svg>
