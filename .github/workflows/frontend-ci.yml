@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
 jobs:
   build:
     timeout-minutes: 10
@@ -38,3 +43,42 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      # Upload build as a generic artifact for PRs/manual inspection
+      - name: Upload dist artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: hka-frontend/dist
+
+      # Prepare artifact for GitHub Pages (consumed by deploy job)
+      - name: Upload Pages artifact
+        if: success()
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: hka-frontend/dist
+
+      # Optional Slack notification on failure (set SLACK_WEBHOOK_URL in repo secrets)
+      - name: Notify Slack on failure
+        if: failure() && env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"Frontend CI failed on ${GITHUB_REF}. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"}" "$SLACK_WEBHOOK_URL"
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: frontend-pages-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
