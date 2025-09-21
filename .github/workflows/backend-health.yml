@@ -17,6 +17,8 @@ jobs:
       group: backend-health-${{ github.ref }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -71,6 +73,22 @@ jobs:
           ROUTERV2_OP_SEPOLIA: "0x005D2E2fcDbA0740725E848cc1bCc019823f118C"
           ROUTERV2_BASE_SEPOLIA: "0x68bAB827101cD4C55d9994bc738f2ED8FfAB974F"
         run: node dist/check-wiring.js
+
+      - name: Notify Slack on failure (optional)
+        if: ${{ failure() }}
+        shell: bash
+        run: |
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            payload=$(cat <<'JSON'
+            {
+              "text": ":x: Backend Health failed\nrepo: ${{ github.repository }}\nref: ${{ github.ref }}\nsha: ${{ github.sha }}\nrun: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            }
+            JSON
+            )
+            curl -s -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL" || true
+          else
+            echo "SLACK_WEBHOOK_URL not set; skipping Slack notification."
+          fi
 
 
 

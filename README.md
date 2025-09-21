@@ -1,6 +1,9 @@
 # Fractal Monorepo
 
+[![Frontend CI](https://github.com/Hk4-dev1/fractal/actions/workflows/frontend-ci.yml/badge.svg)](https://github.com/Hk4-dev1/fractal/actions/workflows/frontend-ci.yml)
 [![Backend Health](https://github.com/Hk4-dev1/fractal/actions/workflows/backend-health.yml/badge.svg)](https://github.com/Hk4-dev1/fractal/actions/workflows/backend-health.yml)
+
+Live preview (GitHub Pages): https://hk4-dev1.github.io/fractal/
 
 This repo contains:
 - fractal-backend: LayerZero v2 wiring scripts and health checks
@@ -19,6 +22,9 @@ Add these repository secrets in GitHub (Settings → Secrets and variables → A
 - OP_SEPOLIA_RPC_URL
 - BASE_SEPOLIA_RPC_URL
 
+Optional (for Slack alerts on failure):
+- SLACK_WEBHOOK_URL — Incoming Webhook URL for the Slack channel to receive failure notifications
+
 Notes:
 - These are used only by Backend Health (read-only). Use any reliable RPC provider (Infura, Alchemy, Blast, etc.).
 - PRIVATE_KEY is not required; the workflow uses a dummy key for read-only calls.
@@ -32,6 +38,9 @@ gh secret set ETH_SEPOLIA_RPC_URL -b "https://sepolia.infura.io/v3/<KEY>"
 gh secret set ARB_SEPOLIA_RPC_URL -b "https://arbitrum-sepolia.infura.io/v3/<KEY>"
 gh secret set OP_SEPOLIA_RPC_URL  -b "https://optimism-sepolia.infura.io/v3/<KEY>"
 gh secret set BASE_SEPOLIA_RPC_URL -b "https://base-sepolia.infura.io/v3/<KEY>"
+
+# Optional: Slack webhook for failure alerts
+gh secret set SLACK_WEBHOOK_URL -b "https://hooks.slack.com/services/XXX/YYY/ZZZ"
 ```
 
 ## One-liner to set GitHub RPC secrets

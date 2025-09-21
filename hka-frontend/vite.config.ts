@@ -4,6 +4,8 @@ import { fileURLToPath, URL } from 'node:url'
 
 // https://vitejs.dev/config/
 export default defineConfig({
+  // Use relative base so assets load correctly under /fractal/ on GitHub Pages
+  base: './',
   plugins: [react()],
   resolve: {
     alias: {

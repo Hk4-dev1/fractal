@@ -12,6 +12,28 @@ permissions:
   id-token: write
 
 jobs:
+  preflight-pages:
+    name: Check Pages enabled
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - name: Check if GitHub Pages is enabled
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            let enabled = false;
+            try {
+              await github.rest.repos.getPages({ owner, repo });
+              enabled = true;
+            } catch (e) {
+              enabled = false;
+              core.info('GitHub Pages not enabled yet (expected on first setup).');
+            }
+            core.setOutput('enabled', String(enabled));
+
   build:
     timeout-minutes: 10
     concurrency:
@@ -32,6 +54,10 @@ jobs:
         with:
           node-version: 20
           # cache disabled to avoid path resolution issues (no lockfile)
+
+      # Prepare GitHub Pages configuration (required by deploy-pages)
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
 
       - name: Install deps
         run: npm install --no-audit --no-fund --legacy-peer-deps --silent
@@ -59,19 +85,13 @@ jobs:
         with:
           path: hka-frontend/dist
 
-      # Optional Slack notification on failure (set SLACK_WEBHOOK_URL in repo secrets)
-      - name: Notify Slack on failure
-        if: failure() && env.SLACK_WEBHOOK_URL != ''
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: |
-          curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"Frontend CI failed on ${GITHUB_REF}. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\"}" "$SLACK_WEBHOOK_URL"
+  # Slack notification is optional; omitted here to keep workflow lint-clean.
 
   deploy:
     name: Deploy to GitHub Pages
-    needs: build
+    needs: [build, preflight-pages]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+  if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.preflight-pages.outputs.enabled == 'true'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -82,3 +102,18 @@ jobs:
       - name: Deploy
         id: deployment
         uses: actions/deploy-pages@v4
+
+  pages-deploy-skip-note:
+    name: Pages deploy skipped
+    needs: [build, preflight-pages]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.preflight-pages.outputs.enabled != 'true'
+    steps:
+      - name: Explain skip
+        run: |
+          echo "## GitHub Pages deploy skipped" >> "$GITHUB_STEP_SUMMARY"
+          echo "GitHub Pages belum aktif untuk repo ini." >> "$GITHUB_STEP_SUMMARY"
+          echo "Aktifkan dengan salah satu opsi berikut:" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Ubah repository menjadi Public (Settings → General → Change repository visibility)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Upgrade ke GitHub Pro/Team/Enterprise untuk Pages di private repo" >> "$GITHUB_STEP_SUMMARY"
+          echo "Setelah aktif, re-run workflow; job deploy akan jalan otomatis." >> "$GITHUB_STEP_SUMMARY"
