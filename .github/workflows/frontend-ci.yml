@@ -13,6 +13,9 @@ jobs:
       group: frontend-ci-${{ github.ref }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hka-frontend
     env:
       CI: true
     steps:
@@ -26,19 +29,17 @@ jobs:
           # cache disabled to avoid path resolution issues (no lockfile)
 
       - name: Install deps
-        working-directory: hka-frontend
         run: npm install --no-audit --no-fund --legacy-peer-deps --silent
 
       - name: Debug workspace
-        working-directory: hka-frontend
         run: |
-          pwd
+          echo "PWD: $(pwd)"
           ls -la
+          echo "tsconfig.json (stat):" && stat tsconfig.json || true
+          echo "First lines of tsconfig.json:" && head -n 20 tsconfig.json || true
 
       - name: Type check
-        working-directory: hka-frontend
         run: npm run type-check
 
       - name: Build
-        working-directory: hka-frontend
         run: npm run build
