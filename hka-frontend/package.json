@@ -11,7 +11,7 @@
     "test:ci": "vitest run --coverage",
     "preview": "vite preview",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 200",
-  "type-check": "tsc -p tsconfig.json --noEmit --pretty false",
+  "type-check": "tsc -p . --noEmit --pretty false",
     "smoke:amm": "node scripts/amm-smoke.mjs",
     "amm:swap": "node scripts/amm-swap.mjs",
     "amm:fees": "node scripts/amm-fees.mjs",
