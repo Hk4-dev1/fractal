@@ -44,7 +44,17 @@ jobs:
       run:
         working-directory: hka-frontend
     env:
-      CI: true
+  CI: true
+  # RPCs (prefer Secrets, fallback to public endpoints)
+  VITE_RPC_ETHEREUM_SEPOLIA: "${{ secrets.VITE_RPC_ETHEREUM_SEPOLIA || 'https://ethereum-sepolia.publicnode.com' }}"
+  VITE_RPC_ARBITRUM_SEPOLIA: "${{ secrets.VITE_RPC_ARBITRUM_SEPOLIA || 'https://sepolia-rollup.arbitrum.io/rpc' }}"
+  VITE_RPC_OPTIMISM_SEPOLIA: "${{ secrets.VITE_RPC_OPTIMISM_SEPOLIA || 'https://sepolia.optimism.io' }}"
+  VITE_RPC_BASE_SEPOLIA: "${{ secrets.VITE_RPC_BASE_SEPOLIA || 'https://sepolia.base.org' }}"
+  # Optional fallbacks (comma-separated)
+  VITE_RPC_ETHEREUM_SEPOLIA_FALLBACKS: "${{ secrets.VITE_RPC_ETHEREUM_SEPOLIA_FALLBACKS || 'https://rpc.sepolia.org, https://ethereum-sepolia.blockpi.network/v1/rpc/public' }}"
+  VITE_RPC_ARBITRUM_SEPOLIA_FALLBACKS: "${{ secrets.VITE_RPC_ARBITRUM_SEPOLIA_FALLBACKS || 'https://arbitrum-sepolia.blockpi.network/v1/rpc/public' }}"
+  VITE_RPC_OPTIMISM_SEPOLIA_FALLBACKS: "${{ secrets.VITE_RPC_OPTIMISM_SEPOLIA_FALLBACKS || 'https://optimism-sepolia.blockpi.network/v1/rpc/public' }}"
+  VITE_RPC_BASE_SEPOLIA_FALLBACKS: "${{ secrets.VITE_RPC_BASE_SEPOLIA_FALLBACKS || 'https://base-sepolia.blockpi.network/v1/rpc/public' }}"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
