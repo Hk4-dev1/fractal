@@ -26,11 +26,19 @@ jobs:
           # cache disabled to avoid path resolution issues (no lockfile)
 
       - name: Install deps
-        run: npm --prefix hka-frontend install --no-audit --no-fund --legacy-peer-deps --silent
+        working-directory: hka-frontend
+        run: npm install --no-audit --no-fund --legacy-peer-deps --silent
+
+      - name: Debug workspace
+        working-directory: hka-frontend
+        run: |
+          pwd
+          ls -la
 
       - name: Type check
-        run: |
-          node "$GITHUB_WORKSPACE/hka-frontend/node_modules/typescript/bin/tsc" -p "$GITHUB_WORKSPACE/hka-frontend/tsconfig.json" --noEmit --pretty false
+        working-directory: hka-frontend
+        run: npm run type-check
 
       - name: Build
-        run: npm --prefix hka-frontend run build
+        working-directory: hka-frontend
+        run: npm run build
