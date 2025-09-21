@@ -39,7 +39,9 @@ jobs:
           echo "First lines of tsconfig.json:" && head -n 20 tsconfig.json || true
 
       - name: Type check
-        run: npm run type-check
+        run: |
+          ls -la
+          node ./node_modules/typescript/bin/tsc -p ./tsconfig.json --noEmit --pretty false
 
       - name: Build
         run: npm run build
