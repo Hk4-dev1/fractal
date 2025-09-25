@@ -1,6 +1,6 @@
 # Fractal Backend (AMM + Escrow + Router)
 
-Minimal backend for ETH native ↔ TestUSDC AMM, EscrowCore with source-chain fees, and a simple Router placeholder. No WETH.
+Minimal backend for ETH native ↔ TestUSDC AMM, EscrowCore with source-chain fees, a LayerZero-style OAppRouter, plus supporting multi‑chain wiring utilities. Fully migrated to viem (no ethers anywhere: scripts or tests). No WETH.
 
 ## Prerequisites
 - Node.js 18+
@@ -85,3 +85,83 @@ Notes
 - Router here is a local placeholder; LayerZero OApp will replace it later.
  - OAppRouter script supports a real endpoint address or deploys MockEndpoint for local-style testing. Ensure Escrow owner calls succeeded when wiring router/peers.
  - The mock 2-chain script deploys: one MockEndpoint, two EscrowCore, and two OAppRouter with peer wiring, so you can simulate cross-chain flow entirely locally.
+
+## Unified Script + Test Architecture (Post-Migration)
+
+All execution paths (scripts + tests) use viem clients. Patterns:
+* Shared utilities in `scripts/core/`:
+   * `env.ts` (raw / addr / optional + validation)
+   * `address.ts` (address assertion + normalization)
+   * `options.ts` (LayerZero type-3 executor option builder)
+   * `contract.ts` (central ABIs + helpers: quote, sendSwap, readNextId, readOwner, readFees, setFees, setRouter, endpointInspectAbi)
+   * `bootstrap.ts` (environment grouping + validation entrypoints)
+   * `log.ts` (structured JSON-ish logging + timing via `time()`)
+   * `flags.ts` (`isDryRun`)
+* No ethers imports anywhere (enforced by guards).
+* All env addresses validated through `addr()` prior to on-chain calls.
+* Centralized ABIs: no ad‑hoc large inline arrays or broad `parseAbi` calls sprinkled across scripts.
+* Event decoding in tests uses `decodeEventLog` with canonical ABIs + `expectSingleEvent` helper to ensure exactly one matching event.
+
+### Adding a New Script
+1. Import helpers: `import { addr, raw } from './core/env';` plus needed contract helpers.
+2. Validate environment early (`ensureAllRpcs()` or targeted group from `bootstrap`).
+3. Build explicit chain objects (id, name, rpcUrls) for wallet/public clients.
+4. Reuse shared ABIs from `contract.ts`; if you genuinely need a one-off single-function ABI, a tiny `parseAbi(['function foo(...)'])` is allowed, but prefer centralization.
+5. Log with `logStep(label, data?)`; bracket state-changing tx with `something:start` and `something:confirmed`.
+6. Honor `--dry-run` (skip writes / deployments, still perform reads + quotes) by checking `isDryRun` before each write.
+
+### Logging & Dry-Run
+* `logStep(label, data?)` prints `[ISO_TIMESTAMP] label: <optional JSON>`.
+* `time(label, asyncFn)` measures execution latency.
+* `--dry-run` behavior (consistent across deploy + wiring scripts):
+   - Skips deployments and writeContract calls (substitutes placeholder sentinel addresses where needed)
+   - Still builds clients, performs calculations/quotes, validates environment
+   - Emits identical structural log labels for diffing planned vs real runs
+
+Example:
+```
+[2025-09-25T10:12:05.123Z] deploy:init: {"deployer":"0x...","dryRun":true}
+[2025-09-25T10:12:05.456Z] deploy:mockUSDC:skip
+[2025-09-25T10:12:05.789Z] deploy:amm:skip
+[2025-09-25T10:12:05.900Z] deploy:complete:{"usdc":"0x0000...dEaD","amm":"0x0000...aAaA"}
+```
+
+Guidelines:
+* Always emit an initial `*:init` (or `deploy:init`) and closing `*:complete` label.
+* For tx flows: `foo:start` -> (optional interim logs) -> `foo:confirmed` (include hash & gasUsed where available).
+* Cross-chain flows: include `{ sourceChain, dstChain, orderId }` or at least `{ chain }` to make logs greppable.
+
+### Test Architecture (viem)
+* All tests use viem wallet & public clients from Hardhat's viem integration.
+* Helpers: `test/utils/viem-helpers.ts` (deploy functions, `AMM_ABI`), `test/utils/assert.ts` (revert + event helpers).
+* Event discipline: `expectSingleEvent(logs, 'EventName', predicate?)` ensures no silent duplicates.
+* Revert checks: `expectRevert(promise, /reason/)` standardizes failure assertions.
+* Case-insensitive address comparisons; numeric values normalized with BigInt.
+
+### Guard Tests
+* `test/no-ethers-import.test.ts` – blocks ethers in scripts.
+* `test/no-ethers-in-tests.test.ts` – blocks ethers in the test suite.
+* `test/no-inline-abi.test.ts` – forbids broad inline ABI arrays or multi-item `parseAbi` usage outside `scripts/core/contract.ts`. (Single-function one-offs allowed.)
+
+### Adding / Updating ABIs
+* Put shared fragments in `scripts/core/contract.ts` (keep them minimal; only what scripts or tests actually need).
+* Prefer extending existing arrays vs creating new duplicates.
+* If adding a brand-new contract interface used across multiple scripts/tests, centralize it first, then import everywhere.
+* Avoid copying full compiler-generated ABIs; extract only required function + event signatures (simplifies event decoding + guard compliance).
+
+### Event Decoding Tips
+* Always decode using the minimal ABI containing the event signature.
+* If multiple events share the same name across different contracts in a test, narrow by `address` AND topics.
+* Guard helpers already lowercase addresses to avoid checksum mismatch noise.
+
+### Migration Status
+* 100% viem: scripts + tests.
+* Ethers + related plugins removed from `package.json` (guarded against reintroduction).
+* Central ABIs & strict event decoding complete.
+
+### Future Improvements (Optional)
+* Further documentation for cross-chain message fee quoting nuances.
+* Decode order IDs directly from event data (replace topic index extraction where still used).
+* CI: fail fast job dedicated to guard tests + lint + typecheck.
+
+

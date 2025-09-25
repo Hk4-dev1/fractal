@@ -1,5 +1,8 @@
 import { HardhatUserConfig } from "hardhat/config";
-import "@nomicfoundation/hardhat-toolbox";
+// Minimal plugin set (avoid hardhat-toolbox to skip implicit ethers requirement)
+import "@nomicfoundation/hardhat-viem";
+import "@nomicfoundation/hardhat-network-helpers";
+import "solidity-coverage";
 import * as dotenv from "dotenv";
 
 dotenv.config();
