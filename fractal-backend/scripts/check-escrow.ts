@@ -1,21 +1,25 @@
-import { ethers } from "hardhat";
-import * as dotenv from "dotenv";
+import * as dotenv from 'dotenv';
+import { createPublicClient, createWalletClient, http } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+import { addr, raw } from './core/env';
+import { readOwner, readRouter } from './core/contract';
+import { ensureBaseRpcEnv } from './core/bootstrap';
+import { logStep } from './core/log';
 
 dotenv.config();
 
-async function main() {
-  const [signer] = await ethers.getSigners();
-  const me = await signer.getAddress();
-  const addr = process.env.ESCROW_ADDRESS;
-  if (!addr) throw new Error("ESCROW_ADDRESS not set");
-  const abi = [
-    "function owner() view returns (address)",
-    "function router() view returns (address)"
-  ];
-  const escrow = new ethers.Contract(addr, abi, signer);
-  const owner = await escrow.owner();
-  const router = await escrow.router();
-  console.log(JSON.stringify({ me, owner, router }, null, 2));
+async function main(){
+  const escrow = addr('ESCROW_ADDRESS');
+  const pk = raw('PRIVATE_KEY').replace(/^0x/,'');
+  const rpc = raw('ETH_SEPOLIA_RPC_URL');
+  ensureBaseRpcEnv();
+  const account = privateKeyToAccount(`0x${pk}`);
+  const chain = { id:11155111, name:'ethereum-sepolia', network:'ethereum-sepolia', nativeCurrency:{name:'Ether',symbol:'ETH',decimals:18}, rpcUrls:{ default:{ http:[rpc] }, public:{ http:[rpc] } } } as const;
+  const wallet = createWalletClient({ account, chain, transport: http(rpc) });
+  const pub = createPublicClient({ chain, transport: http(rpc) });
+  const owner = await readOwner(pub, escrow);
+  const router = await readRouter(pub, escrow);
+  logStep('escrow:info', { signer: account.address, owner, router });
 }
 
-main().catch((e) => { console.error(e); process.exitCode = 1; });
+main().catch(e=>{ console.error(e); process.exitCode=1; });

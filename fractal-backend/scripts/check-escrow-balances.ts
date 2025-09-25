@@ -1,12 +1,9 @@
-import { ethers } from "ethers";
-import * as dotenv from "dotenv";
-import fs from "fs";
-import path from "path";
+import { createPublicClient, http, formatEther } from 'viem';
+import * as dotenv from 'dotenv';
+import { optional } from './core/env';
+import { logStep } from './core/log';
 
 dotenv.config();
-
-const cfgPath = path.join(__dirname, "..", "config", "layerzero.testnets.json");
-const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
 
 type Entry = { label: string; rpcEnv: string; escrowEnv: string };
 const entries: Entry[] = [
@@ -16,19 +13,17 @@ const entries: Entry[] = [
   { label: "base-sepolia", rpcEnv: "BASE_SEPOLIA_RPC_URL", escrowEnv: "ESCROW_BASE_SEPOLIA" },
 ];
 
-function fmt(n: bigint) {
-  return ethers.formatEther(n);
-}
+function fmt(n: bigint) { return formatEther(n); }
 
 async function main() {
-  console.log("Escrow ETH balances:");
+  logStep('balances:start');
   for (const e of entries) {
-    const rpc = process.env[e.rpcEnv];
-    const escrow = process.env[e.escrowEnv];
+  const rpc = optional(e.rpcEnv);
+  const escrow = optional(e.escrowEnv);
     if (!rpc || !escrow) continue;
-    const provider = new ethers.JsonRpcProvider(rpc);
-    const bal = await provider.getBalance(escrow);
-    console.log(`- ${e.label}: ${escrow} -> ${fmt(bal)} ETH`);
+  const client = createPublicClient({ chain: { id: 0, name: e.label, network: e.label, nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: [rpc] }, public: { http: [rpc] } } }, transport: http(rpc) });
+  const bal = await client.getBalance({ address: escrow as `0x${string}` });
+  logStep('balance', { chain: e.label, escrow, eth: fmt(bal) });
   }
 }
 

@@ -1,42 +1,80 @@
-import { ethers } from "hardhat";
+// Deploys MockUSDC and AMM, mints initial USDC, approves and seeds initial liquidity using viem via hardhat-viem.
+// Env vars (optional):
+//   AMM_FEE_BPS (default 30)
+//   INITIAL_ETH_LIQUIDITY (default 10)
+//   INITIAL_USDC_LIQUIDITY (default 20000)
+//   LP_NAME (default ETHsep/mockUSDC)
+//   LP_SYMBOL (default ETHsep/mockUSDC)
 import * as dotenv from "dotenv";
+import { viem } from "hardhat"; // provided by @nomicfoundation/hardhat-viem
+import { parseEther, parseUnits } from "viem";
+import { logStep, time } from './core/log';
+import { isDryRun } from './core/flags';
 
 dotenv.config();
 
 async function main() {
   const feeBps = Number(process.env.AMM_FEE_BPS ?? 30);
-  const initialEth = BigInt(ethers.parseEther(String(process.env.INITIAL_ETH_LIQUIDITY ?? "10")));
-  const initialUsdc = BigInt(ethers.parseUnits(String(process.env.INITIAL_USDC_LIQUIDITY ?? "20000"), 6));
+  const initialEth = parseEther(String(process.env.INITIAL_ETH_LIQUIDITY ?? "10"));
+  const initialUsdc = parseUnits(String(process.env.INITIAL_USDC_LIQUIDITY ?? "20000"), 6);
 
-  const [deployer] = await ethers.getSigners();
-  console.log("Deployer:", await deployer.getAddress());
+  const [deployer] = await viem.getWalletClients();
+  const publicClient = await viem.getPublicClient();
+  logStep('deploy:init', { deployer: deployer.account.address, dryRun: isDryRun });
 
-  // Deploy MockUSDC (6 decimals)
-  const MockUSDC = await ethers.getContractFactory("MockUSDC");
-  const usdc = await MockUSDC.deploy("MockUSDC", "mUSDC", 6, 0);
-  await usdc.waitForDeployment();
-  console.log("MockUSDC:", usdc.target);
+  // Deploy MockUSDC (constructor: name, symbol, decimals, initialSupply)
+  let usdcAddr: string; let usdcAbi: any;
+  if(isDryRun){
+    usdcAddr = '0x000000000000000000000000000000000000dEaD';
+    logStep('deploy:mockUSDC:skip');
+  } else {
+    const usdc = await time('deploy:MockUSDC', () => viem.deployContract("MockUSDC", ["MockUSDC", "mUSDC", 6, 0]));
+    usdcAddr = usdc.address; usdcAbi = usdc.abi;
+    logStep('deploy:mockUSDC:ok', { address: usdcAddr });
+  }
 
   // Mint initial USDC to deployer
-  await (await usdc.mint(await deployer.getAddress(), initialUsdc)).wait();
+  if(!isDryRun){
+    await time('mint:USDC', () => deployer.writeContract({
+      address: usdcAddr as `0x${string}`,
+      abi: usdcAbi,
+      functionName: "mint",
+      args: [deployer.account.address, initialUsdc]
+    }));
+    logStep('mint:usdc', { to: deployer.account.address, amount: initialUsdc.toString() });
+  }
 
-  // Deploy AMM
+  // Deploy AMM (constructor: usdc, feeBps, lpName, lpSymbol)
   const lpName = process.env.LP_NAME ?? "ETHsep/mockUSDC";
   const lpSymbol = process.env.LP_SYMBOL ?? "ETHsep/mockUSDC";
-  const AMM = await ethers.getContractFactory("AMM");
-  const amm = await AMM.deploy(usdc.target, feeBps, lpName, lpSymbol);
-  await amm.waitForDeployment();
-  console.log("AMM:", amm.target);
+  let ammAddr: string; let ammAbi: any;
+  if(isDryRun){
+    ammAddr = '0x000000000000000000000000000000000000aAaA';
+    logStep('deploy:amm:skip');
+  } else {
+    const amm = await time('deploy:AMM', () => viem.deployContract("AMM", [usdcAddr, BigInt(feeBps), lpName, lpSymbol]));
+    ammAddr = amm.address; ammAbi = amm.abi;
+    logStep('deploy:amm:ok', { address: ammAddr });
+  }
 
-  // Approve and add initial liquidity
-  await (await usdc.approve(amm.target, initialUsdc)).wait();
-  await (await amm.addLiquidity(initialUsdc, { value: initialEth })).wait();
+  // Approve USDC to AMM
+  if(!isDryRun){
+    await time('approve:usdc', () => deployer.writeContract({ address: usdcAddr as `0x${string}`, abi: usdcAbi, functionName: "approve", args: [ammAddr, initialUsdc] }));
+    logStep('approve:usdc', { amm: ammAddr, amount: initialUsdc.toString() });
+  }
 
-  const [ethRes, usdcRes] = await amm.getReserves();
-  console.log("Reserves:", ethRes.toString(), usdcRes.toString());
+  // Add initial liquidity (eth value + usdc amount)
+  if(!isDryRun){
+    await time('amm:addLiquidity', () => deployer.writeContract({ address: ammAddr as `0x${string}`, abi: ammAbi, functionName: "addLiquidity", args: [initialUsdc], value: initialEth }));
+    logStep('amm:addLiquidity', { eth: initialEth.toString(), usdc: initialUsdc.toString() });
+  }
+
+  // Read reserves
+  if(!isDryRun){
+  const [ethRes, usdcRes] = await publicClient.readContract({ address: ammAddr as `0x${string}`, abi: ammAbi, functionName: "getReserves", args: [] }) as [bigint,bigint];
+    logStep('amm:reserves', { eth: ethRes.toString(), usdc: usdcRes.toString() });
+  }
+  logStep('deploy:complete', { usdc: usdcAddr, amm: ammAddr });
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exitCode = 1;
-});
+main().catch((e) => { console.error(e); process.exitCode = 1; });

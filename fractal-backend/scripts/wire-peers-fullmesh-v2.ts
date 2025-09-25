@@ -1,7 +1,10 @@
-import { ethers } from "ethers";
 import fs from "fs";
 import path from "path";
 import * as dotenv from "dotenv";
+import { createWalletClient, http, createPublicClient } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { logStep, time } from './core/log';
+import { isDryRun } from './core/flags';
 
 dotenv.config();
 
@@ -33,23 +36,29 @@ async function main() {
   }).filter(Boolean) as Array<{chainKey: string; router: string; rpcUrl: string; eid: number}>;
 
   if (routers.length < 2) throw new Error("Need at least two v2 routers set");
-  console.log("Routers to wire (v2):", routers.map(r => `${r.chainKey}:${r.router}`).join(", "));
+  logStep('wire:init', { routers: routers.map(r => `${r.chainKey}:${r.router}`) });
 
-  const abi = ["function setPeer(uint64 eid, bytes32 peer) external", "function peers(uint32) view returns (bytes32)"];
+  const ABI = [
+    { type: 'function', name: 'setPeer', stateMutability: 'nonpayable', inputs: [ { name: 'eid', type: 'uint64' }, { name: 'peer', type: 'bytes32' } ], outputs: [] },
+    { type: 'function', name: 'peers', stateMutability: 'view', inputs: [ { name: '', type: 'uint32' } ], outputs: [ { type: 'bytes32' } ] }
+  ];
 
   for (const a of routers) {
-    const provider = new ethers.JsonRpcProvider(a.rpcUrl);
-    const signer = new ethers.Wallet(pk, provider);
-    const rA = new ethers.Contract(a.router, abi, signer);
+    const account = privateKeyToAccount(pk as `0x${string}`);
+    const chain = { id: 0, name: a.chainKey, network: a.chainKey, nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: [a.rpcUrl] }, public: { http: [a.rpcUrl] } } };
+    const walletClient = createWalletClient({ account, chain, transport: http(a.rpcUrl) });
+    const publicClient = createPublicClient({ chain, transport: http(a.rpcUrl) });
     for (const b of routers) {
       if (a.chainKey === b.chainKey) continue;
-      const peer = ethers.zeroPadValue(ethers.getAddress(b.router), 32);
-      console.log(`Set peer on ${a.chainKey} -> eid ${b.eid} = ${b.router}`);
+      const peer = `0x${b.router.toLowerCase().replace('0x','').padStart(64,'0')}`;
+    logStep('wire:peer:start', { from: a.chainKey, to: b.chainKey });
       let attempts = 0;
       while (true) {
         try {
-          const tx = await rA.setPeer(BigInt(b.eid), peer);
-          await tx.wait();
+      if(isDryRun){ logStep('wire:peer:skip', { from: a.chainKey, to: b.chainKey }); break; }
+      const hash = await time('setPeer', () => walletClient.writeContract({ address: a.router as `0x${string}`, abi: ABI as any, functionName: 'setPeer', args: [BigInt(b.eid), peer], account: walletClient.account!, chain: walletClient.chain }));
+      await publicClient.waitForTransactionReceipt({ hash });
+      logStep('wire:peer:confirmed', { from: a.chainKey, to: b.chainKey, tx: hash });
           await sleep(300);
           break;
         } catch (e: any) {
@@ -64,7 +73,7 @@ async function main() {
     }
   }
 
-  console.log("V2 full-mesh wiring complete.");
+  logStep('wire:complete');
 }
 
 main().catch((e) => { console.error(e); process.exitCode = 1; });

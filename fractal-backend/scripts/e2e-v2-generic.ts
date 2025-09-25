@@ -1,7 +1,13 @@
-import { ethers } from "ethers";
-import * as dotenv from "dotenv";
-import fs from "fs";
-import path from "path";
+import * as dotenv from 'dotenv';
+import fs from 'fs';
+import path from 'path';
+import { createWalletClient, createPublicClient, http, parseAbi, encodePacked, parseEther } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+import { buildOptions } from './core/options';
+import { addr, raw } from './core/env';
+import { routerAbi, escrowAbi } from './core/contract';
+import { ensureAllRpcs } from './core/bootstrap';
+import { logStep, time } from './core/log';
 
 dotenv.config();
 
@@ -31,21 +37,7 @@ function toEscrowEnv(chainKey: ChainKey): string {
   return `ESCROW_${chainKey.toUpperCase().replace(/-/g, "_")}`;
 }
 
-// Build LZ v2 Type-3 options with Executor lzReceive gas
-function buildLzV2OptionsLzReceiveGas(gas: bigint, value: bigint = 0n): string {
-  const TYPE3 = 3n; // uint16
-  const WORKER_EXECUTOR_ID = 1n; // uint8
-  const OPTTYPE_LZRECEIVE = 1n; // uint8
-  const opt = value === 0n
-    ? ethers.solidityPacked(["uint128"], [gas])
-    : ethers.solidityPacked(["uint128", "uint128"], [gas, value]);
-  const optBytes = ethers.getBytes(opt);
-  const size = 1 + optBytes.length;
-  const header = ethers.getBytes(ethers.solidityPacked(["uint16"], [TYPE3]));
-  const execChunk = ethers.getBytes(ethers.solidityPacked(["uint8", "uint16", "uint8"], [WORKER_EXECUTOR_ID, size, OPTTYPE_LZRECEIVE]));
-  const full = ethers.concat([header, execChunk, optBytes]);
-  return ethers.hexlify(full);
-}
+// Options now centralized in core/options
 
 async function main() {
   // Inputs via env or args
@@ -54,7 +46,8 @@ async function main() {
   const DST: ChainKey = (process.env.DST_CHAIN_KEY || args[1]) as ChainKey;
   if (!SRC || !DST) throw new Error("Provide SRC_CHAIN_KEY and DST_CHAIN_KEY (env or args)");
 
-  const pk = ensure("PRIVATE_KEY");
+  const pk = ensure("PRIVATE_KEY").replace(/^0x/, "");
+  ensureAllRpcs();
 
   const cfgPath = path.join(__dirname, "..", "config", "layerzero.testnets.json");
   const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
@@ -64,53 +57,45 @@ async function main() {
   // Providers & Signers
   const srcRpc = ensure(toRpcEnv(SRC));
   const dstRpc = ensure(toRpcEnv(DST));
-  const srcProvider = new ethers.JsonRpcProvider(srcRpc);
-  const dstProvider = new ethers.JsonRpcProvider(dstRpc);
-  const srcWallet = new ethers.Wallet(pk, srcProvider);
-  const dstWallet = new ethers.Wallet(pk, dstProvider);
-  const me = await srcWallet.getAddress();
-  console.log("SRC→DST:", SRC, "→", DST, "Signer:", me);
+  const account = privateKeyToAccount(`0x${pk}`);
+  const srcChain = { id: 0, name: SRC, network: SRC, nativeCurrency:{name:"Ether",symbol:"ETH",decimals:18}, rpcUrls:{ default:{ http:[srcRpc] }, public:{ http:[srcRpc] } } } as const;
+  const dstChain = { id: 0, name: DST, network: DST, nativeCurrency:{name:"Ether",symbol:"ETH",decimals:18}, rpcUrls:{ default:{ http:[dstRpc] }, public:{ http:[dstRpc] } } } as const;
+  const srcWallet = createWalletClient({ account, chain: srcChain, transport: http(srcRpc) });
+  const dstWallet = createWalletClient({ account, chain: dstChain, transport: http(dstRpc) });
+  const srcPublic = createPublicClient({ chain: srcChain, transport: http(srcRpc) });
+  const dstPublic = createPublicClient({ chain: dstChain, transport: http(dstRpc) });
+  const me = account.address;
+  logStep('init', { src: SRC, dst: DST, signer: me });
 
   // Contracts: DST escrow, SRC router
-  const dstEscrowAddr = ensure(toEscrowEnv(DST));
-  const srcRouterAddr = ensure(toRouterEnv(SRC));
+  const dstEscrowAddr = addr(toEscrowEnv(DST));
+  const srcRouterAddr = addr(toRouterEnv(SRC));
 
-  const escrowAbi = [
-    "function nextOrderId() view returns (uint256)",
-    "function createOrder(address tokenIn,address tokenOut,uint256 amountIn,uint256 minAmountOut,uint64 dstEid) payable returns (uint256)",
-    "function getOrder(uint256) view returns (tuple(address maker,address tokenIn,address tokenOut,uint256 amountIn,uint256 minAmountOut,uint64 dstEid,uint256 createdAt,uint8 status))",
-  ];
-  const dstEscrow = new ethers.Contract(dstEscrowAddr, escrowAbi, dstWallet);
-
-  const routerAbi = [
-    "function quote(uint32,bytes,bytes) view returns (uint256 nativeFee, uint256 lzTokenFee)",
-    "function sendSwapMessage(uint32,bytes,bytes) payable",
-  ];
-  const srcRouter = new ethers.Contract(srcRouterAddr, routerAbi, srcWallet);
+  const escrowParsed = escrowAbi;
+  const routerParsed = routerAbi;
 
   // 1) Create order on DST (srcEid embedded)
-  const nextId: bigint = await dstEscrow.nextOrderId();
-  const amountIn = ethers.parseEther("0.002");
-  console.log("Creating DST order", { id: nextId.toString(), amountIn: amountIn.toString(), srcEid });
-  const tx1 = await dstEscrow.createOrder(ethers.ZeroAddress, ethers.ZeroAddress, amountIn, 0, BigInt(cfg[SRC].eid), { value: amountIn });
-  await tx1.wait();
-  console.log("DST createOrder tx:", tx1.hash);
+  const nextId = await dstPublic.readContract({ address: dstEscrowAddr, abi: escrowParsed, functionName: 'nextOrderId', args: [] }) as bigint;
+  const amountIn = parseEther("0.002");
+  logStep('createOrder:start', { chain: DST, id: nextId.toString(), amountIn: amountIn.toString(), srcEid });
+  const txHash1 = await time('createOrder', () => dstWallet.writeContract({ account, address: dstEscrowAddr, abi: escrowParsed, functionName: 'createOrder', args: ['0x0000000000000000000000000000000000000000','0x0000000000000000000000000000000000000000',amountIn,0n, BigInt(cfg[SRC].eid) ], value: amountIn }));
+  await dstPublic.waitForTransactionReceipt({ hash: txHash1 });
+  logStep('createOrder:confirmed', { tx: txHash1 });
 
   // 2) Build payload and options
-  const payload = ethers.AbiCoder.defaultAbiCoder().encode(["uint256","address","uint256"], [nextId, me, 0]);
-  const options = buildLzV2OptionsLzReceiveGas(250_000n);
+  const payload = encodePacked(['uint256','address','uint256'],[nextId, me, 0n]);
+  const options = buildOptions(250_000n);
 
   // 3) Quote and send from SRC to DST (with multihop fallback)
   try {
-    const fee = await srcRouter.quote(dstEid, payload, options);
-    const nativeFee = (fee.nativeFee ?? fee[0]) as bigint;
-    console.log("Quote:", nativeFee.toString());
-    const tx2 = await srcRouter.sendSwapMessage(dstEid, payload, options, { value: nativeFee });
-    await tx2.wait();
-    console.log("SRC send tx:", tx2.hash);
+    const [nativeFee] = await time('quote', () => srcPublic.readContract({ address: srcRouterAddr, abi: routerParsed, functionName: 'quote', args: [dstEid, payload, options] }) as Promise<[bigint,bigint]>);
+    logStep('quote', { nativeFee: nativeFee.toString() });
+    const txHash2 = await time('sendSwapMessage', () => srcWallet.writeContract({ account, address: srcRouterAddr, abi: routerParsed, functionName: 'sendSwapMessage', args: [dstEid, payload, options], value: nativeFee }));
+    await srcPublic.waitForTransactionReceipt({ hash: txHash2 });
+    logStep('send:confirmed', { tx: txHash2 });
   } catch (e: any) {
     const msg = (e?.message || e?.toString?.() || "").toLowerCase();
-    console.warn("Direct route failed, switching to multihop fallback...", msg);
+  logStep('route:fallback', { reason: msg.slice(0,160) });
     const HOP = (process.env.HOP_CHAIN_KEY || "ethereum-sepolia") as ChainKey;
     await runMultihop(pk, SRC, HOP, DST);
     return;
@@ -118,18 +103,18 @@ async function main() {
 
   // 4) Check updated order on DST
   await new Promise((r) => setTimeout(r, 8000));
-  const ord = await dstEscrow.getOrder(nextId);
-  console.log("DST order after:", { status: ord.status, maker: ord.maker, amountIn: ord.amountIn.toString() });
+  const ord: any = await dstPublic.readContract({ address: dstEscrowAddr, abi: escrowParsed, functionName: 'getOrder', args: [nextId] });
+  logStep('order:final', { status: ord.status, maker: ord.maker, amountIn: ord.amountIn.toString() });
 }
 
 main().catch((e) => { console.error(e); process.exitCode = 1; });
 
 // ---- Multihop helpers ----
 async function runMultihop(pk: string, SRC: ChainKey, HOP: ChainKey, DST: ChainKey) {
-  console.log(`Multihop: ${SRC} -> ${HOP} -> ${DST}`);
+  logStep('multihop', { path: [SRC,HOP,DST] });
   await sendLeg(pk, SRC, HOP);
   await sendLeg(pk, HOP, DST);
-  console.log("Multihop complete");
+  logStep('multihop:complete', { path: [SRC,HOP,DST] });
 }
 
 function toRpcEnv(k: ChainKey): string {
@@ -159,47 +144,34 @@ async function sendLeg(pk: string, SRC: ChainKey, DST: ChainKey) {
   const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
   const srcRpc = ensure(toRpcEnv(SRC));
   const dstRpc = ensure(toRpcEnv(DST));
-  const srcProvider = new ethers.JsonRpcProvider(srcRpc);
-  const dstProvider = new ethers.JsonRpcProvider(dstRpc);
-  const srcWallet = new ethers.Wallet(pk, srcProvider);
-  const dstWallet = new ethers.Wallet(pk, dstProvider);
-  const me = await srcWallet.getAddress();
-
-  const dstEscrowAddr = ensure(toEscrowEnvVar(DST));
-  const srcRouterAddr = ensure(toRouterEnvVar(SRC));
-
-  const escrowAbi = [
-    "function nextOrderId() view returns (uint256)",
-    "function createOrder(address tokenIn,address tokenOut,uint256 amountIn,uint256 minAmountOut,uint64 dstEid) payable returns (uint256)",
-    "function getOrder(uint256) view returns (tuple(address maker,address tokenIn,address tokenOut,uint256 amountIn,uint256 minAmountOut,uint64 dstEid,uint256 createdAt,uint8 status))",
-  ];
-  const routerAbi = [
-    "function quote(uint32,bytes,bytes) view returns (uint256 nativeFee, uint256 lzTokenFee)",
-    "function sendSwapMessage(uint32,bytes,bytes) payable",
-  ];
-  const dstEscrow = new ethers.Contract(dstEscrowAddr, escrowAbi, dstWallet);
-  const srcRouter = new ethers.Contract(srcRouterAddr, routerAbi, srcWallet);
-
-  const srcEid: number = cfg[SRC].eid;
-  const dstEid: number = cfg[DST].eid;
-
-  const nextId: bigint = await dstEscrow.nextOrderId();
-  const amountIn = ethers.parseEther("0.002");
-  console.log(`Creating order on ${DST}`, { id: nextId.toString(), amountIn: amountIn.toString(), srcEid });
-  const tx1 = await dstEscrow.createOrder(ethers.ZeroAddress, ethers.ZeroAddress, amountIn, 0, BigInt(srcEid), { value: amountIn });
-  await tx1.wait();
-  console.log(`${DST} createOrder tx:`, tx1.hash);
-
-  const payload = ethers.AbiCoder.defaultAbiCoder().encode(["uint256","address","uint256"], [nextId, me, 0]);
-  const options = buildLzV2OptionsLzReceiveGas(250_000n);
-  const fee = await srcRouter.quote(dstEid, payload, options);
-  const nativeFee = (fee.nativeFee ?? fee[0]) as bigint;
-  console.log(`${SRC}→${DST} quote:`, nativeFee.toString());
-  const tx2 = await srcRouter.sendSwapMessage(dstEid, payload, options, { value: nativeFee });
-  await tx2.wait();
-  console.log(`${SRC} send tx:`, tx2.hash);
-
-  await new Promise((r) => setTimeout(r, 8000));
-  const ord = await dstEscrow.getOrder(nextId);
-  console.log(`${DST} order after:`, { status: ord.status, maker: ord.maker, amountIn: ord.amountIn.toString() });
+  const account = privateKeyToAccount(pk.startsWith('0x')? pk as `0x${string}`: (`0x${pk}` as `0x${string}`));
+  const srcChain = { id:0, name:SRC, network:SRC, nativeCurrency:{name:'Ether',symbol:'ETH',decimals:18}, rpcUrls:{ default:{ http:[srcRpc] }, public:{ http:[srcRpc] } } } as const;
+  const dstChain = { id:0, name:DST, network:DST, nativeCurrency:{name:'Ether',symbol:'ETH',decimals:18}, rpcUrls:{ default:{ http:[dstRpc] }, public:{ http:[dstRpc] } } } as const;
+  const srcWallet = createWalletClient({ account, chain: srcChain, transport: http(srcRpc) });
+  const dstWallet = createWalletClient({ account, chain: dstChain, transport: http(dstRpc) });
+  const srcPublic = createPublicClient({ chain: srcChain, transport: http(srcRpc) });
+  const dstPublic = createPublicClient({ chain: dstChain, transport: http(dstRpc) });
+  const me = account.address;
+  const dstEscrowAddr = addr(toEscrowEnvVar(DST));
+  const srcRouterAddr = addr(toRouterEnvVar(SRC));
+  const escrowParsed = escrowAbi;
+  const routerParsed = routerAbi;
+  const srcEid:number = cfg[SRC].eid;
+  const dstEid:number = cfg[DST].eid;
+  const nextId = await dstPublic.readContract({ address: dstEscrowAddr, abi: escrowParsed, functionName: 'nextOrderId', args: [] }) as bigint;
+  const amountIn = parseEther('0.002');
+  logStep('createOrder:start', { chain: DST, id: nextId.toString(), amountIn: amountIn.toString(), srcEid });
+  const txHash1 = await dstWallet.writeContract({ account, address: dstEscrowAddr, abi: escrowParsed, functionName: 'createOrder', args: ['0x0000000000000000000000000000000000000000','0x0000000000000000000000000000000000000000',amountIn,0n, BigInt(srcEid) ], value: amountIn });
+  await dstPublic.waitForTransactionReceipt({ hash: txHash1 });
+  logStep('createOrder:confirmed', { tx: txHash1 });
+  const payload = encodePacked(['uint256','address','uint256'],[nextId, me, 0n]);
+  const options = buildOptions(250_000n);
+  const [nativeFee] = await srcPublic.readContract({ address: srcRouterAddr, abi: routerParsed, functionName: 'quote', args: [dstEid, payload, options] }) as [bigint, bigint];
+  logStep('quote', { src:SRC, dst:DST, nativeFee: nativeFee.toString() });
+  const txHash2 = await srcWallet.writeContract({ account, address: srcRouterAddr, abi: routerParsed, functionName: 'sendSwapMessage', args: [dstEid, payload, options], value: nativeFee });
+  await srcPublic.waitForTransactionReceipt({ hash: txHash2 });
+  logStep('send:confirmed', { tx: txHash2 });
+  await new Promise(r=>setTimeout(r,8000));
+  const ord:any = await dstPublic.readContract({ address: dstEscrowAddr, abi: escrowParsed, functionName: 'getOrder', args: [nextId] });
+  logStep('order:final', { chain: DST, status: ord.status, maker: ord.maker, amountIn: ord.amountIn.toString?.() });
 }

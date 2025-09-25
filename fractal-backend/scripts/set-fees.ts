@@ -1,43 +1,33 @@
-import { ethers } from "hardhat";
-import * as dotenv from "dotenv";
+import * as dotenv from 'dotenv';
+import { createWalletClient, createPublicClient, http } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+import { addr, raw } from './core/env';
+import { readOwner, readFees, setFees } from './core/contract';
+import { ensureBaseRpcEnv } from './core/bootstrap';
+import { logStep, time } from './core/log';
 
 dotenv.config();
 
-async function main() {
-  const [signer] = await ethers.getSigners();
-  const me = await signer.getAddress();
-  const escrowAddr = process.env.ESCROW_ADDRESS;
-  if (!escrowAddr) throw new Error("ESCROW_ADDRESS not set");
+async function main(){
+  const escrow = addr('ESCROW_ADDRESS');
+  const pk = raw('PRIVATE_KEY').replace(/^0x/,'');
+  const rpc = raw('ETH_SEPOLIA_RPC_URL'); // assumes sepolia; could be generalized
+  ensureBaseRpcEnv();
+  const account = privateKeyToAccount(`0x${pk}`);
+  const chain = { id:11155111, name:'ethereum-sepolia', network:'ethereum-sepolia', nativeCurrency:{name:'Ether',symbol:'ETH',decimals:18}, rpcUrls:{ default:{ http:[rpc] }, public:{ http:[rpc] } } } as const;
+  const wallet = createWalletClient({ account, chain, transport: http(rpc) });
+  const pub = createPublicClient({ chain, transport: http(rpc) });
 
-  const targetEscrowBps = BigInt(process.env.NEW_ESCROW_FEE_BPS || "30"); // 0.30%
-  const targetProtocolBps = BigInt(process.env.NEW_PROTOCOL_FEE_BPS || "5"); // 0.05%
-
-  const abi = [
-    "function setFees(uint256,uint256,address,address) external",
-    "function escrowFeeBps() view returns (uint256)",
-    "function protocolFeeBps() view returns (uint256)",
-    "function treasuryEscrow() view returns (address)",
-    "function treasuryProtocol() view returns (address)",
-    "function owner() view returns (address)",
-  ];
-  const escrow = new ethers.Contract(escrowAddr, abi, signer);
-  const owner: string = await escrow.owner();
-  if (owner.toLowerCase() !== me.toLowerCase()) {
-    throw new Error(`Not owner. Owner=${owner}, you=${me}`);
-  }
-
-  const curEscrow: bigint = await escrow.escrowFeeBps();
-  const curProtocol: bigint = await escrow.protocolFeeBps();
-  const tEscrow: string = await escrow.treasuryEscrow();
-  const tProtocol: string = await escrow.treasuryProtocol();
-
-  console.log("Current:", { curEscrow: curEscrow.toString(), curProtocol: curProtocol.toString(), tEscrow, tProtocol });
-  console.log("Updating to:", { escrowFeeBps: targetEscrowBps.toString(), protocolFeeBps: targetProtocolBps.toString() });
-
-  const tx = await escrow.setFees(Number(targetEscrowBps), Number(targetProtocolBps), tEscrow, tProtocol);
-  console.log("tx:", tx.hash);
-  await tx.wait();
-  console.log("Fees updated.");
+  const owner = await readOwner(pub, escrow);
+  if(owner.toLowerCase() !== account.address.toLowerCase()) throw new Error(`Not owner. Owner=${owner} you=${account.address}`);
+  const { escrowFee, protocolFee, treasuryEscrow, treasuryProtocol } = await readFees(pub, escrow);
+  const newEscrow = BigInt(process.env.NEW_ESCROW_FEE_BPS || '30');
+  const newProtocol = BigInt(process.env.NEW_PROTOCOL_FEE_BPS || '5');
+  logStep('fees:current', { escrowFee: escrowFee.toString(), protocolFee: protocolFee.toString(), treasuryEscrow, treasuryProtocol });
+  logStep('fees:update', { escrowFeeBps: newEscrow.toString(), protocolFeeBps: newProtocol.toString() });
+  const hash = await time('setFees', () => setFees(wallet, escrow, newEscrow, newProtocol, treasuryEscrow, treasuryProtocol));
+  await pub.waitForTransactionReceipt({ hash });
+  logStep('fees:updated', { tx: hash });
 }
 
-main().catch((e) => { console.error(e); process.exitCode = 1; });
+main().catch(e=>{ console.error(e); process.exitCode=1; });

@@ -41,6 +41,7 @@
   "ci:test": "hardhat test",
   "ci:verify": "npm run lint && npm run format:check && npm run typecheck && npm run ci:test"
   },
+  "postinstall": "rimraf typechain-types",
   "devDependencies": {
     "@nomicfoundation/hardhat-network-helpers": "^1.1.0",
     "@nomicfoundation/hardhat-verify": "^2.1.1",

@@ -1,5 +1,6 @@
 import { expect } from "chai";
-import { ethers } from "hardhat";
+import { viem } from "hardhat";
+import { parseEther, encodeAbiParameters } from 'viem';
 
 /**
  * Cross-chain E2E (mocked):
@@ -8,88 +9,84 @@ import { ethers } from "hardhat";
  * - Each EID has EscrowCore + OAppRouter wired; creating order on A sends payload and executes on B
  */
 
-describe("CrossChain E2E (mocked endpoint)", function () {
+describe("CrossChain E2E (mocked endpoint, viem)", function () {
   it("create order on A -> execute on B via routers", async () => {
-    const [owner, user, treasuryE, treasuryP, recipient] = await ethers.getSigners();
+  const [owner, user, treasuryE, treasuryP, recipient] = await viem.getWalletClients();
 
     // Endpoint
-    const Endpoint = await ethers.getContractFactory("MockEndpoint");
-    const endpoint = await Endpoint.deploy();
-    await endpoint.waitForDeployment();
+  const endpoint = await viem.deployContract("MockEndpoint", []);
 
     // Escrow A
-    const Escrow = await ethers.getContractFactory("EscrowCore");
-    const escrowA = await Escrow.deploy(
-      await owner.getAddress(),
-      10, // 0.1%
-      10, // 0.1%
-      await treasuryE.getAddress(),
-      await treasuryP.getAddress()
-    );
-    await escrowA.waitForDeployment();
+    const escrowA = await viem.deployContract("EscrowCore", [
+      owner.account.address,
+      10,
+      10,
+      treasuryE.account.address,
+      treasuryP.account.address
+    ]);
 
     // Escrow B
-    const escrowB = await Escrow.deploy(
-      await owner.getAddress(),
+    const escrowB = await viem.deployContract("EscrowCore", [
+      owner.account.address,
       10,
       10,
-      await treasuryE.getAddress(),
-      await treasuryP.getAddress()
-    );
-    await escrowB.waitForDeployment();
+      treasuryE.account.address,
+      treasuryP.account.address
+    ]);
 
     // Routers with escrow wiring
-    const Router = await ethers.getContractFactory("OAppRouter");
-  const routerA = await Router.deploy(endpoint.target, escrowA.target, await owner.getAddress(), 100);
-  const routerB = await Router.deploy(endpoint.target, escrowB.target, await owner.getAddress(), 200);
-    await routerA.waitForDeployment();
-    await routerB.waitForDeployment();
+  const routerA = await viem.deployContract("OAppRouter", [endpoint.address, escrowA.address, owner.account.address, 100]);
+  const routerB = await viem.deployContract("OAppRouter", [endpoint.address, escrowB.address, owner.account.address, 200]);
 
     // Register routers on endpoint
-    await (await endpoint.setRouter(100, routerA.target)).wait();
-    await (await endpoint.setRouter(200, routerB.target)).wait();
+  await owner.writeContract({ address: endpoint.address, abi: endpoint.abi, functionName: 'setRouter', args: [100, routerA.address] });
+  await owner.writeContract({ address: endpoint.address, abi: endpoint.abi, functionName: 'setRouter', args: [200, routerB.address] });
 
     // Set peers (not strictly used by MockEndpoint but mirrors real setup)
-    await (await routerA.setPeer(200, ethers.zeroPadValue(routerB.target as string, 32))).wait();
-    await (await routerB.setPeer(100, ethers.zeroPadValue(routerA.target as string, 32))).wait();
+  function pad32(addr: string): `0x${string}` { return ('0x' + addr.replace(/^0x/, '').padStart(64, '0')) as `0x${string}`; }
+  await owner.writeContract({ address: routerA.address, abi: routerA.abi, functionName: 'setPeer', args: [200, pad32(routerB.address)] });
+  await owner.writeContract({ address: routerB.address, abi: routerB.abi, functionName: 'setPeer', args: [100, pad32(routerA.address)] });
 
     // Allow routerB to call escrowB by setting router on escrowB
-    await (await escrowA.setRouter(routerA.target)).wait();
-    await (await escrowB.setRouter(routerB.target)).wait();
+  await owner.writeContract({ address: escrowA.address, abi: escrowA.abi, functionName: 'setRouter', args: [routerA.address] });
+  await owner.writeContract({ address: escrowB.address, abi: escrowB.abi, functionName: 'setRouter', args: [routerB.address] });
 
     // Create an ETH order ID on B first (to simulate a corresponding order entry on dest)
-    const txB = await (escrowB as any).connect(owner).createOrder(
-      ethers.ZeroAddress,
-      ethers.ZeroAddress,
-      ethers.parseEther("1"),
+    const txHashB = await owner.writeContract({ address: escrowB.address, abi: escrowB.abi, functionName: 'createOrder', args: [
+      '0x0000000000000000000000000000000000000000',
+      '0x0000000000000000000000000000000000000000',
+      parseEther('1'),
       0n,
-      0,
-      { value: ethers.parseEther("1") }
-    );
-    const rcB = await txB.wait();
-    const evB = rcB!.logs.map((l: any) => (l as any).args).find((a: any) => a && a.id);
-    const idB = evB.id as bigint;
+      0
+    ], value: parseEther('1') });
+    const pc = await viem.getPublicClient();
+    const rcB = await pc.getTransactionReceipt({ hash: txHashB });
+    const logB = rcB.logs.find(l => l.address.toLowerCase() === escrowB.address.toLowerCase());
+    const idB = logB && logB.topics[1] ? BigInt(logB.topics[1] as string) : 1n;
 
     // User creates an ETH order on A; send payload to B to execute to recipient (carrying idB for dest)
-    const amountIn = ethers.parseEther("1");
-    const tx = await (escrowA as any).connect(user).createOrder(
-      ethers.ZeroAddress,
-      ethers.ZeroAddress,
+    const amountIn = parseEther('1');
+    const txHashA = await user.writeContract({ address: escrowA.address, abi: escrowA.abi, functionName: 'createOrder', args: [
+      '0x0000000000000000000000000000000000000000',
+      '0x0000000000000000000000000000000000000000',
       amountIn,
       0n,
-      200,
-      { value: amountIn }
-    );
-    const rc = await tx.wait();
-    const ev = rc!.logs.map((l: any) => (l as any).args).find((a: any) => a && a.id);
-    const id = ev.id as bigint;
+      200
+    ], value: amountIn });
+    const rcA = await pc.getTransactionReceipt({ hash: txHashA });
+    const logA = rcA.logs.find(l => l.address.toLowerCase() === escrowA.address.toLowerCase());
+    const id = logA && logA.topics[1] ? BigInt(logA.topics[1] as string) : 1n;
 
   // Router A sends message to B, with the destination order id (sendSwapMessage internally forwards via endpoint)
-    const payload = ethers.AbiCoder.defaultAbiCoder().encode(["uint256","address","uint256"], [idB, await recipient.getAddress(), 0n]);
-    await (await routerA.sendSwapMessage(200, payload)).wait();
+    const payload = encodeAbiParameters([
+      { name: 'id', type: 'uint256' },
+      { name: 'recipient', type: 'address' },
+      { name: 'extra', type: 'uint256' }
+    ], [idB, recipient.account.address, 0n]);
+    await owner.writeContract({ address: routerA.address, abi: routerA.abi, functionName: 'sendSwapMessage', args: [200, payload] });
 
   // Assert order executed on B via routerB.lzReceive -> escrowB.executeFromRemote
-    const ordB = await escrowB.getOrder(idB);
+  const ordB = await pc.readContract({ address: escrowB.address, abi: escrowB.abi, functionName: 'getOrder', args: [idB] }) as any;
     expect(ordB.status).to.equal(3); // Executed
   });
 });

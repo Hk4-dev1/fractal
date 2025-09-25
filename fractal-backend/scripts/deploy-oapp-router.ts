@@ -1,7 +1,17 @@
-import { ethers } from "hardhat";
+import * as dotenv from "dotenv";
 import fs from "fs";
 import path from "path";
-import * as dotenv from "dotenv";
+import { viem } from "hardhat";
+import { getAddress, zeroAddress } from "viem";
+import { logStep } from './core/log';
+
+// Minimal ABIs needed
+const MOCK_ENDPOINT_ABI = [
+  { "type": "function", "name": "setRouter", "stateMutability": "nonpayable", "inputs": [ { "name": "eid", "type": "uint64" }, { "name": "router", "type": "address" } ], "outputs": [] }
+];
+const ESCROW_CORE_ABI = [
+  { "type": "function", "name": "setRouter", "stateMutability": "nonpayable", "inputs": [ { "name": "_router", "type": "address" } ], "outputs": [] }
+];
 
 dotenv.config();
 
@@ -23,9 +33,9 @@ function parseCommaList(name: string): string[] | undefined {
 }
 
 async function main() {
-  const [deployer] = await ethers.getSigners();
-  const deployerAddr = await deployer.getAddress();
-  console.log("Deployer:", deployerAddr);
+  const [deployer] = await viem.getWalletClients();
+  const deployerAddr = deployer.account.address;
+  logStep('deploy-oapp-router:init', { deployer: deployerAddr });
 
   // Required env
   const ESCROW_ADDRESS = requireEnv("ESCROW_ADDRESS");
@@ -40,7 +50,7 @@ async function main() {
     if (!cfg[chainKey]) throw new Error(`Unknown CHAIN_KEY in config: ${chainKey}`);
     if (!localEidStr) {
       localEidStr = String(cfg[chainKey].eid);
-      console.log(`Derived LOCAL_EID=${localEidStr} from CHAIN_KEY=${chainKey}`);
+  logStep('deploy-oapp-router:derived-local-eid', { chainKey, localEid: localEidStr });
     }
     endpointFromCfg = cfg[chainKey].endpointV2;
   }
@@ -63,58 +73,67 @@ async function main() {
   let endpointAddr: string;
   if (OAPP_ENDPOINT) {
     endpointAddr = OAPP_ENDPOINT;
-    console.log("Using existing endpoint:", endpointAddr);
+  logStep('deploy-oapp-router:endpoint:existing', { endpoint: endpointAddr });
   } else {
     if (endpointFromCfg) {
       endpointAddr = endpointFromCfg;
-      console.log("Using endpointV2 from config:", endpointAddr);
+  logStep('deploy-oapp-router:endpoint:config', { endpoint: endpointAddr, chainKey });
     } else {
-      console.log("Deploying MockEndpoint (no OAPP_ENDPOINT set)...");
-      const Endpoint = await ethers.getContractFactory("MockEndpoint");
-      const endpoint = await Endpoint.deploy();
-      await endpoint.waitForDeployment();
-      endpointAddr = (endpoint as any).target as string;
-      console.log("MockEndpoint:", endpointAddr);
+  logStep('deploy-oapp-router:endpoint:mock:deploying');
+  const endpoint = await viem.deployContract("MockEndpoint", []);
+  endpointAddr = endpoint.address;
+  logStep('deploy-oapp-router:endpoint:mock:deployed', { endpoint: endpointAddr });
     }
   }
 
-  console.log("Deploying OAppRouter...");
-  const Router = await ethers.getContractFactory("OAppRouter");
-  const router = await Router.deploy(
+  logStep('deploy-oapp-router:router:deploying');
+  const router = await viem.deployContract("OAppRouter", [
     endpointAddr,
     ESCROW_ADDRESS,
     deployerAddr,
     LOCAL_EID
-  );
-  await router.waitForDeployment();
-  const routerAddr = (router as any).target as string;
-  console.log("OAppRouter:", routerAddr);
+  ]);
+  const routerAddr = router.address;
+  logStep('deploy-oapp-router:router:deployed', { router: routerAddr });
 
   // If endpoint is MockEndpoint we control, set this router for LOCAL_EID so it can receive
   if (!OAPP_ENDPOINT) {
-    const endpoint = await ethers.getContractAt("MockEndpoint", endpointAddr);
-    await (await endpoint.setRouter(LOCAL_EID, routerAddr)).wait();
-    console.log(`MockEndpoint: setRouter(${LOCAL_EID}) -> ${routerAddr}`);
+    await deployer.writeContract({
+      address: endpointAddr as `0x${string}`,
+      abi: MOCK_ENDPOINT_ABI as any,
+      functionName: "setRouter",
+      args: [LOCAL_EID, routerAddr as `0x${string}`]
+    });
+  logStep('deploy-oapp-router:endpoint:set-router', { localEid: LOCAL_EID.toString(), router: routerAddr });
   }
 
   // Wire peers (if provided)
   if (PEER_EIDS && PEER_ADDRESSES) {
-    console.log("Setting peers...");
+  logStep('deploy-oapp-router:peers:start');
     for (let i = 0; i < PEER_EIDS.length; i++) {
       const eid = BigInt(PEER_EIDS[i]);
-      const peerAddr = ethers.getAddress(PEER_ADDRESSES[i]);
-      const peerBytes32 = ethers.zeroPadValue(peerAddr, 32);
-      await (await (router as any).setPeer(eid, peerBytes32)).wait();
-      console.log(`Peer set: eid=${eid} -> ${peerAddr} (${peerBytes32})`);
+      const peerAddr = getAddress(PEER_ADDRESSES[i]);
+      const peerBytes32 = peerAddr.toLowerCase().replace('0x','').padStart(64,'0');
+      await deployer.writeContract({
+        address: router.address,
+        abi: router.abi,
+        functionName: "setPeer",
+        args: [eid, `0x${peerBytes32}`]
+      });
+  logStep('deploy-oapp-router:peers:set', { eid: eid.toString(), peer: peerAddr });
     }
   }
 
   // Point escrow to this router
-  const escrow = await ethers.getContractAt("EscrowCore", ESCROW_ADDRESS);
-  await (await (escrow as any).setRouter(routerAddr)).wait();
-  console.log("EscrowCore router set ->", routerAddr);
+  await deployer.writeContract({
+    address: ESCROW_ADDRESS as `0x${string}`,
+    abi: ESCROW_CORE_ABI as any,
+    functionName: "setRouter",
+    args: [routerAddr as `0x${string}`]
+  });
+  logStep('deploy-oapp-router:escrow:set-router', { router: routerAddr });
 
-  console.log("Done.");
+  logStep('deploy-oapp-router:complete', { router: routerAddr, endpoint: endpointAddr });
 }
 
 main().catch((e) => {

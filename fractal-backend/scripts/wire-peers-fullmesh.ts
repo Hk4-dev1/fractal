@@ -1,7 +1,9 @@
-import { ethers } from "ethers";
 import fs from "fs";
 import path from "path";
 import * as dotenv from "dotenv";
+import { createWalletClient, createPublicClient, http } from "viem";
+import { logStep } from './core/log';
+import { privateKeyToAccount } from "viem/accounts";
 
 dotenv.config();
 
@@ -24,23 +26,30 @@ function sleep(ms: number) {
   return new Promise((res) => setTimeout(res, ms));
 }
 
-async function setPeer(provider: ethers.JsonRpcProvider, signer: ethers.Wallet, routerAddr: string, eid: bigint, peerAddr: string) {
-  const abi = [
-    "function setPeer(uint64 eid, bytes32 peer) external",
+async function setPeer(walletClient: ReturnType<typeof createWalletClient>, routerAddr: string, eid: bigint, peerAddr: string) {
+  const ABI = [
+    { type: 'function', name: 'setPeer', stateMutability: 'nonpayable', inputs: [ { name: 'eid', type: 'uint64' }, { name: 'peer', type: 'bytes32' } ], outputs: [] }
   ];
-  const router = new ethers.Contract(routerAddr, abi, signer.connect(provider));
-  const peerBytes32 = ethers.zeroPadValue(ethers.getAddress(peerAddr), 32);
+  const peerBytes32 = `0x${peerAddr.toLowerCase().replace('0x','').padStart(64,'0')}`;
   const maxRetries = 5;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const tx = await router.setPeer(eid, peerBytes32);
-      await tx.wait();
+      const hash = await walletClient.writeContract({
+        address: routerAddr as `0x${string}`,
+        abi: ABI as any,
+        functionName: 'setPeer',
+        args: [eid, peerBytes32],
+        account: walletClient.account!,
+        chain: walletClient.chain
+      });
+      // wait for receipt using a matching public client
+      const publicClient = createPublicClient({ chain: walletClient.chain!, transport: http(walletClient.chain!.rpcUrls.default.http[0]) });
+      await publicClient.waitForTransactionReceipt({ hash });
       return;
     } catch (e: any) {
       const msg = (e?.message || "").toLowerCase();
       const retryable = msg.includes("nonce too low") || msg.includes("nonce has already been used") || msg.includes("replacement transaction underpriced") || msg.includes("timeout") || msg.includes("rate limit") || msg.includes("timeout exceeded");
       if (attempt < maxRetries && retryable) {
-        // small backoff then retry
         await sleep(1500 * attempt);
         continue;
       }
@@ -70,27 +79,28 @@ async function main() {
     throw new Error("Need at least two routers deployed and set in env to wire peers.");
   }
 
-  console.log("Routers to wire:", routers.map(r => `${r.chainKey}:${r.router}`).join(", "));
+  logStep('wire-peers:init', { routers: routers.map(r => ({ chainKey: r.chainKey, router: r.router })) });
 
   // Build providers and signers
   const contexts = routers.map((r) => {
-    const provider = new ethers.JsonRpcProvider(r.rpcUrl);
-    const wallet = new ethers.Wallet(pk, provider);
-    return { ...r, provider, wallet };
+    const account = privateKeyToAccount(pk as `0x${string}`);
+    const chain = { id: 0, name: r.chainKey, network: r.chainKey, nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: [r.rpcUrl] }, public: { http: [r.rpcUrl] } } };
+    const walletClient = createWalletClient({ account, chain, transport: http(r.rpcUrl) });
+    return { ...r, walletClient };
   });
 
   // Full mesh: for each A, set peers for all B != A
   for (const a of contexts) {
     for (const b of contexts) {
       if (a.chainKey === b.chainKey) continue;
-      console.log(`Setting peer on ${a.chainKey} router ${a.router} for eid ${cfg[b.chainKey].eid} -> ${b.router}`);
-      await setPeer(a.provider, a.wallet, a.router, BigInt(cfg[b.chainKey].eid), b.router);
+  logStep('wire-peers:set', { chain: a.chainKey, router: a.router, eid: cfg[b.chainKey].eid, peer: b.router });
+  await setPeer(a.walletClient, a.router, BigInt(cfg[b.chainKey].eid), b.router);
       // tiny delay to avoid provider rate limits / nonce races
       await sleep(400);
     }
   }
 
-  console.log("Full-mesh peer wiring complete.");
+  logStep('wire-peers:complete');
 }
 
 main().catch((e) => {

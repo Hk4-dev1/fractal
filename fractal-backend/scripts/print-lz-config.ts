@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import * as dotenv from "dotenv";
+import { logStep } from './core/log';
 
 dotenv.config();
 
@@ -18,4 +19,4 @@ if (!c) {
   process.exit(1);
 }
 
-console.log(JSON.stringify({ chainKey, ...c }, null, 2));
+logStep('lz-config', { chainKey, ...c });

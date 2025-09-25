@@ -1,5 +1,7 @@
-import { ethers } from "hardhat";
 import * as dotenv from "dotenv";
+import { viem } from "hardhat";
+import { getAddress } from "viem";
+import { logStep } from './core/log';
 
 dotenv.config();
 
@@ -10,9 +12,9 @@ function requireEnv(name: string): string {
 }
 
 async function main() {
-  const [deployer] = await ethers.getSigners();
-  const deployerAddr = await deployer.getAddress();
-  console.log("Deployer:", deployerAddr);
+  const [deployer] = await viem.getWalletClients();
+  const deployerAddr = deployer.account.address;
+  logStep('deploy-mock2:init', { deployer: deployerAddr });
 
   // Fees and treasuries for both escrows (reuse env)
   const escrowFeeBps = 50; // 0.5%
@@ -25,73 +27,61 @@ async function main() {
   const EID_B = BigInt(process.env.LOCAL_EID_B || "10002");
 
   // Deploy MockEndpoint
-  console.log("Deploying MockEndpoint...");
-  const Endpoint = await ethers.getContractFactory("MockEndpoint");
-  const endpoint = await Endpoint.deploy();
-  await endpoint.waitForDeployment();
-  const endpointAddr = (endpoint as any).target as string;
-  console.log("MockEndpoint:", endpointAddr);
+  logStep('deploy-mock2:endpoint:deploying');
+  const endpoint = await viem.deployContract("MockEndpoint", []);
+  const endpointAddr = endpoint.address;
+  logStep('deploy-mock2:endpoint:deployed', { endpoint: endpointAddr });
 
   // Deploy two EscrowCore instances
-  const Escrow = await ethers.getContractFactory("EscrowCore");
-  const escrowA = await Escrow.deploy(
+  const escrowA = await viem.deployContract("EscrowCore", [
     deployerAddr,
     escrowFeeBps,
     protocolFeeBps,
     treasuryEscrow,
     treasuryProtocol
-  );
-  await escrowA.waitForDeployment();
-  const escrowAAddr = (escrowA as any).target as string;
-  console.log("Escrow A:", escrowAAddr);
+  ]);
+  const escrowAAddr = escrowA.address;
+  logStep('deploy-mock2:escrowA:deployed', { escrowA: escrowAAddr });
 
-  const escrowB = await Escrow.deploy(
+  const escrowB = await viem.deployContract("EscrowCore", [
     deployerAddr,
     escrowFeeBps,
     protocolFeeBps,
     treasuryEscrow,
     treasuryProtocol
-  );
-  await escrowB.waitForDeployment();
-  const escrowBAddr = (escrowB as any).target as string;
-  console.log("Escrow B:", escrowBAddr);
+  ]);
+  const escrowBAddr = escrowB.address;
+  logStep('deploy-mock2:escrowB:deployed', { escrowB: escrowBAddr });
 
   // Deploy two OAppRouters wired to MockEndpoint
-  const Router = await ethers.getContractFactory("OAppRouter");
-  const routerA = await Router.deploy(endpointAddr, escrowAAddr, deployerAddr, EID_A);
-  await routerA.waitForDeployment();
-  const routerAAddr = (routerA as any).target as string;
-  console.log("Router A:", routerAAddr);
+  const routerA = await viem.deployContract("OAppRouter", [endpointAddr, escrowAAddr, deployerAddr, EID_A]);
+  const routerAAddr = routerA.address;
+  logStep('deploy-mock2:routerA:deployed', { routerA: routerAAddr });
 
-  const routerB = await Router.deploy(endpointAddr, escrowBAddr, deployerAddr, EID_B);
-  await routerB.waitForDeployment();
-  const routerBAddr = (routerB as any).target as string;
-  console.log("Router B:", routerBAddr);
+  const routerB = await viem.deployContract("OAppRouter", [endpointAddr, escrowBAddr, deployerAddr, EID_B]);
+  const routerBAddr = routerB.address;
+  logStep('deploy-mock2:routerB:deployed', { routerB: routerBAddr });
 
   // Register routers in endpoint for each EID
-  await (await endpoint.setRouter(EID_A, routerAAddr)).wait();
-  await (await endpoint.setRouter(EID_B, routerBAddr)).wait();
-  console.log("MockEndpoint: routers registered for EIDs", EID_A.toString(), EID_B.toString());
+  const MOCK_ENDPOINT_ABI = [{ type: 'function', name: 'setRouter', stateMutability: 'nonpayable', inputs: [{ name: 'eid', type: 'uint64' }, { name: 'router', type: 'address' }], outputs: [] }];
+  await deployer.writeContract({ address: endpointAddr as `0x${string}`, abi: MOCK_ENDPOINT_ABI as any, functionName: 'setRouter', args: [EID_A, routerAAddr as `0x${string}`] });
+  await deployer.writeContract({ address: endpointAddr as `0x${string}`, abi: MOCK_ENDPOINT_ABI as any, functionName: 'setRouter', args: [EID_B, routerBAddr as `0x${string}`] });
+  logStep('deploy-mock2:endpoint:routers-registered', { EID_A: EID_A.toString(), EID_B: EID_B.toString() });
 
   // Wire peers (each other)
-  const peerABytes32 = ethers.zeroPadValue(routerAAddr, 32);
-  const peerBBytes32 = ethers.zeroPadValue(routerBAddr, 32);
-  await (await (routerA as any).setPeer(EID_B, peerBBytes32)).wait();
-  await (await (routerB as any).setPeer(EID_A, peerABytes32)).wait();
-  console.log("Peers set:", { A_to_B: peerBBytes32, B_to_A: peerABytes32 });
+  const peerABytes32 = `0x${routerAAddr.toLowerCase().replace('0x','').padStart(64,'0')}`;
+  const peerBBytes32 = `0x${routerBAddr.toLowerCase().replace('0x','').padStart(64,'0')}`;
+  await deployer.writeContract({ address: routerA.address, abi: routerA.abi, functionName: 'setPeer', args: [EID_B, peerBBytes32] });
+  await deployer.writeContract({ address: routerB.address, abi: routerB.abi, functionName: 'setPeer', args: [EID_A, peerABytes32] });
+  logStep('deploy-mock2:peers:set', { A_to_B: peerBBytes32, B_to_A: peerABytes32 });
 
   // Point escrows to their routers
-  await (await (escrowA as any).setRouter(routerAAddr)).wait();
-  await (await (escrowB as any).setRouter(routerBAddr)).wait();
-  console.log("Escrow routers set.");
+  const ESCROW_ABI = [{ type: 'function', name: 'setRouter', stateMutability: 'nonpayable', inputs: [{ name: '_router', type: 'address' }], outputs: [] }];
+  await deployer.writeContract({ address: escrowAAddr as `0x${string}`, abi: ESCROW_ABI as any, functionName: 'setRouter', args: [routerAAddr as `0x${string}`] });
+  await deployer.writeContract({ address: escrowBAddr as `0x${string}`, abi: ESCROW_ABI as any, functionName: 'setRouter', args: [routerBAddr as `0x${string}`] });
+  logStep('deploy-mock2:escrows:set-router');
 
-  console.log("\nMock 2-chain topology deployed:");
-  console.log("Endpoint:", endpointAddr);
-  console.log("EIDs:", { EID_A: EID_A.toString(), EID_B: EID_B.toString() });
-  console.log("Escrow A:", escrowAAddr);
-  console.log("Escrow B:", escrowBAddr);
-  console.log("Router A:", routerAAddr);
-  console.log("Router B:", routerBAddr);
+  logStep('deploy-mock2:complete', { endpoint: endpointAddr, EID_A: EID_A.toString(), EID_B: EID_B.toString(), escrowA: escrowAAddr, escrowB: escrowBAddr, routerA: routerAAddr, routerB: routerBAddr });
 }
 
 main().catch((e) => {

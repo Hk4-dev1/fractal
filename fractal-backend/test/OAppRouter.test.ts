@@ -1,5 +1,9 @@
 import { expect } from "chai";
-import { ethers } from "hardhat";
+import { viem } from "hardhat";
+
+function pad32(addr: string): `0x${string}` {
+  return ('0x' + addr.replace(/^0x/, '').padStart(64, '0')) as `0x${string}`;
+}
 
 /**
  * OAppRouter with MockEndpoint
@@ -7,30 +11,26 @@ import { ethers } from "hardhat";
  * - Send message via endpoint and receive on dst router
  */
 
-describe("OAppRouter + MockEndpoint", function () {
+describe("OAppRouter + MockEndpoint (viem)", function () {
   it("forwards payload from src to dst via endpoint", async () => {
-    const [owner] = await ethers.getSigners();
+  const [owner] = await viem.getWalletClients();
 
-    const Endpoint = await ethers.getContractFactory("MockEndpoint");
-    const endpoint = await Endpoint.deploy();
-    await endpoint.waitForDeployment();
+  const endpoint = await viem.deployContract("MockEndpoint", []);
 
-  const Router = await ethers.getContractFactory("OAppRouter");
-  const routerA = await Router.deploy(endpoint.target, ethers.ZeroAddress, await owner.getAddress(), 100);
-  const routerB = await Router.deploy(endpoint.target, ethers.ZeroAddress, await owner.getAddress(), 200);
-    await routerA.waitForDeployment();
-    await routerB.waitForDeployment();
+  const routerA = await viem.deployContract("OAppRouter", [endpoint.address, '0x0000000000000000000000000000000000000000', owner.account.address, 100]);
+  const routerB = await viem.deployContract("OAppRouter", [endpoint.address, '0x0000000000000000000000000000000000000000', owner.account.address, 200]);
 
     // Register routers on endpoint
-    await (await endpoint.setRouter(100, routerA.target)).wait();
-    await (await endpoint.setRouter(200, routerB.target)).wait();
+  await owner.writeContract({ address: endpoint.address, abi: endpoint.abi, functionName: 'setRouter', args: [100, routerA.address] });
+  await owner.writeContract({ address: endpoint.address, abi: endpoint.abi, functionName: 'setRouter', args: [200, routerB.address] });
 
     // Set peers
-    await (await routerA.setPeer(200, ethers.zeroPadValue(routerB.target as string, 32))).wait();
-    await (await routerB.setPeer(100, ethers.zeroPadValue(routerA.target as string, 32))).wait();
+  await owner.writeContract({ address: routerA.address, abi: routerA.abi, functionName: 'setPeer', args: [200, pad32(routerB.address)] });
+  await owner.writeContract({ address: routerB.address, abi: routerB.abi, functionName: 'setPeer', args: [100, pad32(routerA.address)] });
 
-    const payload = ethers.toUtf8Bytes("hello");
-    await (await routerA.sendSwapMessage(200, payload)).wait();
+  const payloadBytes = new TextEncoder().encode("hello");
+  const payloadHex = ('0x' + Buffer.from(payloadBytes).toString('hex')) as `0x${string}`;
+  await owner.writeContract({ address: routerA.address, abi: routerA.abi, functionName: 'sendSwapMessage', args: [200, payloadHex] });
 
     // If no reverts, routerB accepted lzReceive via endpoint.forward
     expect(true).to.equal(true);

@@ -1,7 +1,9 @@
-import { ethers } from "ethers";
 import fs from "fs";
 import path from "path";
 import * as dotenv from "dotenv";
+import { createPublicClient, http } from "viem";
+import { getAddress } from "viem";
+import { logStep } from './core/log';
 
 dotenv.config();
 
@@ -53,7 +55,7 @@ async function main() {
   const cfgPath = path.join(__dirname, "..", "config", "layerzero.testnets.json");
   const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
 
-  type Ctx = { chainKey: string; router: string; escrow?: string; provider: ethers.AbstractProvider; eid: number; endpointV2: string };
+  type Ctx = { chainKey: string; router: string; escrow?: string; client: ReturnType<typeof createPublicClient>; eid: number; endpointV2: string };
   const backupRpcs: Record<string, string[]> = {
     "ethereum-sepolia": [
       "https://rpc.sepolia.org"
@@ -79,21 +81,22 @@ async function main() {
     "base-sepolia": 84532,
   };
 
-  async function selectProvider(urls: string[], wantChainId?: number): Promise<ethers.AbstractProvider> {
+  async function selectClient(urls: string[]): Promise<ReturnType<typeof createPublicClient>> {
     const cleaned = urls.filter(Boolean);
     for (const u of cleaned) {
-      const p = new ethers.JsonRpcProvider(u);
       try {
-        const net = await callWithRetry(() => p.getNetwork(), `getNetwork(${new URL(u).hostname})`, 2);
-        if (!wantChainId || Number(net.chainId) === Number(wantChainId)) {
-          return p;
-        }
+        const chain = { id: 0, name: 'tmp', network: 'tmp', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: [u] }, public: { http: [u] } } } as const;
+        const client = createPublicClient({ chain, transport: http(u) });
+        // simple call: getBlockNumber
+        await callWithRetry(() => client.getBlockNumber(), `getBlockNumber(${new URL(u).hostname})`, 2);
+        return client;
       } catch (_e) {
-        // try next
+        continue;
       }
     }
-    // fallback: return first provider; may still succeed for simple calls
-    return new ethers.JsonRpcProvider(cleaned[0]);
+    const u = cleaned[0];
+    const chain = { id: 0, name: 'fallback', network: 'fallback', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: [u] }, public: { http: [u] } } } as const;
+    return createPublicClient({ chain, transport: http(u) });
   }
 
   // Build contexts asynchronously to allow provider selection
@@ -103,52 +106,50 @@ async function main() {
     const escrow = process.env[e.escrowEnv];
     if (!primary || !router) return undefined; // skip if missing
     const urls = [primary, ...(backupRpcs[e.chainKey] || [])];
-    const provider = await selectProvider(urls, expectedChainId[e.chainKey]);
+  const client = await selectClient(urls);
     const eid: number = cfg[e.chainKey]?.eid;
     const endpointV2: string = cfg[e.chainKey]?.endpointV2;
-    return { chainKey: e.chainKey, router, escrow, provider, eid, endpointV2 };
+  return { chainKey: e.chainKey, router, escrow, client, eid, endpointV2 };
   });
 
   const contexts = (await Promise.all(ctxPromises)).filter((x): x is Ctx => !!x);
 
   if (contexts.length < 2) throw new Error("Need at least two routers set in env to check wiring");
 
-  const routerAbi = [
-  "function peers(uint32) view returns (bytes32)",
-    "function endpoint() view returns (address)",
+  const ROUTER_ABI = [
+    { type: 'function', name: 'peers', stateMutability: 'view', inputs: [{ name: '', type: 'uint32' }], outputs: [{ type: 'bytes32' }] },
+    { type: 'function', name: 'endpoint', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] }
   ];
-  const escrowAbi = [
-    "function router() view returns (address)",
+  const ESCROW_ABI = [
+    { type: 'function', name: 'router', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] }
   ];
 
   let ok = true;
   for (const a of contexts) {
-    const router = new ethers.Contract(a.router, routerAbi, a.provider);
-    const endpoint: string = await callWithRetry(() => router.endpoint(), `[${a.chainKey}] router.endpoint()`);
-  console.log(`\n[${a.chainKey}] router=${a.router} expectedEid=${a.eid} endpoint=${endpoint}`);
+  const endpoint: string = await callWithRetry(() => a.client.readContract({ address: a.router as `0x${string}`, abi: ROUTER_ABI as any, functionName: 'endpoint', args: [] }) as any, `[${a.chainKey}] router.endpoint()`);
+  logStep('wiring:router', { chain: a.chainKey, router: a.router, expectedEid: a.eid, endpoint });
     if (a.endpointV2 && endpoint.toLowerCase() !== a.endpointV2.toLowerCase()) {
       ok = false;
       console.error(`  MISMATCH endpoint: expected ${a.endpointV2}, got ${endpoint}`);
     }
     if (a.escrow) {
-      const escrow = new ethers.Contract(a.escrow, escrowAbi, a.provider);
-      const curRouter: string = await callWithRetry(() => escrow.router(), `[${a.chainKey}] escrow.router()`);
+  const curRouter: string = await callWithRetry(() => a.client.readContract({ address: a.escrow as `0x${string}`, abi: ESCROW_ABI as any, functionName: 'router', args: [] }) as any, `[${a.chainKey}] escrow.router()`);
       if (curRouter.toLowerCase() !== a.router.toLowerCase()) {
         ok = false;
         console.error(`  MISMATCH escrow.router: expected ${a.router}, got ${curRouter}`);
       } else {
-        console.log(`  escrow.router OK -> ${curRouter}`);
+  logStep('wiring:escrowRouterOk', { chain: a.chainKey, router: curRouter });
       }
     }
     for (const b of contexts) {
       if (a.chainKey === b.chainKey) continue;
-      const want = ethers.zeroPadValue(ethers.getAddress(b.router), 32);
-      const got: string = await callWithRetry(() => router.peers(BigInt(b.eid)), `[${a.chainKey}] router.peers(${b.eid})`);
+  const want = `0x${getAddress(b.router).toLowerCase().replace('0x','').padStart(64,'0')}`;
+  const got: string = await callWithRetry(() => a.client.readContract({ address: a.router as `0x${string}`, abi: ROUTER_ABI as any, functionName: 'peers', args: [BigInt(b.eid)] }) as any, `[${a.chainKey}] router.peers(${b.eid})`);
       if (want.toLowerCase() !== got.toLowerCase()) {
         ok = false;
         console.error(`  MISMATCH peer for eid ${b.eid}: expected ${want}, got ${got}`);
       } else {
-        console.log(`  peer[${b.eid}] OK -> ${b.router}`);
+  logStep('wiring:peerOk', { from: a.chainKey, toEid: b.eid, toRouter: b.router });
       }
       // small pacing to avoid hitting provider rate limits
       await sleep(150);
@@ -159,7 +160,7 @@ async function main() {
   if (!ok) {
     throw new Error("Wiring check FAILED");
   }
-  console.log("\nWiring check PASSED for all configured chains.");
+  logStep('wiring:complete');
 }
 
 main().catch((e) => { console.error(e); process.exitCode = 1; });
