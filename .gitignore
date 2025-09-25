@@ -30,7 +30,9 @@ node_modules/
 *.swp
 *.swo
 
-# Lockfiles (optional)
+# Lockfiles
+# We commit backend lockfile for deterministic CI caching
+!fractal-backend/package-lock.json
 package-lock.json
 pnpm-lock.yaml
 yarn.lock
