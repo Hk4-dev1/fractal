@@ -22,7 +22,7 @@ jobs:
           node-version: 18
           cache: 'npm'
           cache-dependency-path: |
-            fractal-backend/package-lock.json
+            **/package-lock.json
       - name: Install deps
         run: npm ci
       - name: Typecheck / Lint / Tests
