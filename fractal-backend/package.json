@@ -48,7 +48,7 @@
     "@types/mocha": "^10.0.10",
     "@types/node": "^20.11.0",
     "@nomicfoundation/hardhat-viem": "^2.0.0",
-    "viem": "^1.19.9",
+  "viem": "^2.37.8",
     "chai": "^4.5.0",
     "dotenv": "^16.4.5",
     "eslint": "^8.57.0",
