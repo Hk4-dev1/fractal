@@ -55,7 +55,7 @@ async function main() {
   const cfgPath = path.join(__dirname, "..", "config", "layerzero.testnets.json");
   const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
 
-  type Ctx = { chainKey: string; router: string; escrow?: string; client: ReturnType<typeof createPublicClient>; eid: number; endpointV2: string };
+  type Ctx = { chainKey: string; router: string; escrow?: string; client: any; eid: number; endpointV2: string };
   const backupRpcs: Record<string, string[]> = {
     "ethereum-sepolia": [
       "https://rpc.sepolia.org"
@@ -81,7 +81,7 @@ async function main() {
     "base-sepolia": 84532,
   };
 
-  async function selectClient(urls: string[]): Promise<ReturnType<typeof createPublicClient>> {
+  async function selectClient(urls: string[]): Promise<any> {
     const cleaned = urls.filter(Boolean);
     for (const u of cleaned) {
       try {
@@ -126,14 +126,14 @@ async function main() {
 
   let ok = true;
   for (const a of contexts) {
-  const endpoint: string = await callWithRetry(() => a.client.readContract({ address: a.router as `0x${string}`, abi: ROUTER_ABI as any, functionName: 'endpoint', args: [] }) as any, `[${a.chainKey}] router.endpoint()`);
+  const endpoint: string = await callWithRetry(() => (a.client as any).readContract({ address: a.router as `0x${string}`, abi: ROUTER_ABI as any, functionName: 'endpoint', args: [] } as any) as any, `[${a.chainKey}] router.endpoint()`);
   logStep('wiring:router', { chain: a.chainKey, router: a.router, expectedEid: a.eid, endpoint });
     if (a.endpointV2 && endpoint.toLowerCase() !== a.endpointV2.toLowerCase()) {
       ok = false;
       console.error(`  MISMATCH endpoint: expected ${a.endpointV2}, got ${endpoint}`);
     }
     if (a.escrow) {
-  const curRouter: string = await callWithRetry(() => a.client.readContract({ address: a.escrow as `0x${string}`, abi: ESCROW_ABI as any, functionName: 'router', args: [] }) as any, `[${a.chainKey}] escrow.router()`);
+  const curRouter: string = await callWithRetry(() => (a.client as any).readContract({ address: a.escrow as `0x${string}`, abi: ESCROW_ABI as any, functionName: 'router', args: [] } as any) as any, `[${a.chainKey}] escrow.router()`);
       if (curRouter.toLowerCase() !== a.router.toLowerCase()) {
         ok = false;
         console.error(`  MISMATCH escrow.router: expected ${a.router}, got ${curRouter}`);
@@ -144,7 +144,7 @@ async function main() {
     for (const b of contexts) {
       if (a.chainKey === b.chainKey) continue;
   const want = `0x${getAddress(b.router).toLowerCase().replace('0x','').padStart(64,'0')}`;
-  const got: string = await callWithRetry(() => a.client.readContract({ address: a.router as `0x${string}`, abi: ROUTER_ABI as any, functionName: 'peers', args: [BigInt(b.eid)] }) as any, `[${a.chainKey}] router.peers(${b.eid})`);
+  const got: string = await callWithRetry(() => (a.client as any).readContract({ address: a.router as `0x${string}`, abi: ROUTER_ABI as any, functionName: 'peers', args: [BigInt(b.eid)] } as any) as any, `[${a.chainKey}] router.peers(${b.eid})`);
       if (want.toLowerCase() !== got.toLowerCase()) {
         ok = false;
         console.error(`  MISMATCH peer for eid ${b.eid}: expected ${want}, got ${got}`);
