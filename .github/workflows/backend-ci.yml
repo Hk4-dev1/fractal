@@ -26,6 +26,15 @@ jobs:
       - name: Install deps (tolerate npm v10 peer strictness)
         run: |
           npm ci --omit=peer || npm install --no-audit --no-fund --legacy-peer-deps
+      - name: Cache Hardhat build
+        uses: actions/cache@v4
+        with:
+          path: |
+            fractal-backend/cache
+            fractal-backend/artifacts
+          key: hardhat-${{ runner.os }}-${{ hashFiles('fractal-backend/package-lock.json', 'fractal-backend/hardhat.config.ts', 'fractal-backend/contracts/**/*.sol') }}
+          restore-keys: |
+            hardhat-${{ runner.os }}-
       - name: Typecheck / Lint / Tests
         run: npm run ci:verify
       - name: Hardhat compile (artifact smoke)
