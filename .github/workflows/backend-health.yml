@@ -83,7 +83,7 @@ jobs:
             {
               "text": ":x: Backend Health failed\nrepo: ${{ github.repository }}\nref: ${{ github.ref }}\nsha: ${{ github.sha }}\nrun: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             }
-            JSON
+JSON
             )
             curl -s -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL" || true
           else
