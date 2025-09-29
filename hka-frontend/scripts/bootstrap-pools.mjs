@@ -4,22 +4,48 @@
 import dotenv from 'dotenv'
 import path from 'path'
 dotenv.config({ path: path.resolve(process.cwd(), '.env'), override: true })
-import { ethers } from 'ethers'
+import { createPublicClient, createWalletClient, http, parseUnits, parseAbi, getAddress } from 'viem'
+import { privateKeyToAccount } from 'viem/accounts'
 
-const ERC20_ABI = [
+// Human-readable fragments parsed to full ABI objects for viem
+const ERC20_ABI = parseAbi([
   'function balanceOf(address) view returns (uint256)',
   'function decimals() view returns (uint8)',
   'function approve(address spender, uint256 value) returns (bool)',
   'function allowance(address owner, address spender) view returns (uint256)',
   'function mint(address to, uint256 amount) returns (bool)'
-]
-// ERC20 for TestETH and USDC
+])
+// Minimal AMM surface we need
 const AMM_ABI = [
-  'function setTokenSupport(address _token, bool _supported) external',
-  'function owner() view returns (address)',
-  'function getPool(address _token0, address _token1) external view returns (tuple(address token0,address token1,uint256 reserve0,uint256 reserve1,uint256 totalSupply,uint256 lastUpdateTime,bool exists))',
-  'function createPool(address _token0, address _token1) external',
-  'function addLiquidity(address _token0, address _token1, uint256 _amount0, uint256 _amount1, uint256 _minAmount0, uint256 _minAmount1) external returns (uint256)'
+  ...parseAbi([
+    'function setTokenSupport(address _token, bool _supported)',
+    'function owner() view returns (address)',
+    'function createPool(address _token0, address _token1)',
+    'function addLiquidity(address _token0, address _token1, uint256 _amount0, uint256 _amount1, uint256 _minAmount0, uint256 _minAmount1) returns (uint256)'
+  ]),
+  {
+    type: 'function',
+    name: 'getPool',
+    stateMutability: 'view',
+    inputs: [
+      { name: '_token0', type: 'address' },
+      { name: '_token1', type: 'address' }
+    ],
+    outputs: [
+      {
+        type: 'tuple',
+        components: [
+          { name: 'token0', type: 'address' },
+          { name: 'token1', type: 'address' },
+          { name: 'reserve0', type: 'uint256' },
+          { name: 'reserve1', type: 'uint256' },
+          { name: 'totalSupply', type: 'uint256' },
+          { name: 'lastUpdateTime', type: 'uint256' },
+          { name: 'exists', type: 'bool' }
+        ]
+      }
+    ]
+  }
 ]
 
 const CHAINS = {
@@ -55,53 +81,67 @@ if (!PRIVATE_KEY || PRIVATE_KEY.length < 66) {
 
 async function ensurePoolAndLiquidity(name, cfg) {
   console.log(`\n=== ${name.toUpperCase()} (${cfg.chainId}) ===`)
-  const provider = new ethers.JsonRpcProvider(cfg.rpc)
-  const wallet = new ethers.Wallet(PRIVATE_KEY, provider)
-  const me = await wallet.getAddress()
+  const account = privateKeyToAccount(PRIVATE_KEY)
+  const chain = {
+    id: cfg.chainId,
+    name: name,
+    network: name,
+    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+    rpcUrls: { default: { http: [cfg.rpc] } }
+  }
+  const publicClient = createPublicClient({ chain, transport: http(cfg.rpc) })
+  const walletClient = createWalletClient({ account, chain, transport: http(cfg.rpc) })
+  const me = account.address
   console.log('Account:', me)
 
-  const code = await provider.getCode(cfg.amm)
+  const code = await publicClient.getBytecode({ address: cfg.amm })
   if (!code || code === '0x') {
     console.error('AMM contract not found at', cfg.amm)
     process.exit(1)
   }
-  const amm = new ethers.Contract(cfg.amm, AMM_ABI, wallet)
+  let ammOwner
   try {
-    const own = await amm.owner()
-    console.log('AMM.owner:', own)
+    ammOwner = await publicClient.readContract({ address: cfg.amm, abi: AMM_ABI, functionName: 'owner' })
+    console.log('AMM.owner:', ammOwner)
   } catch {}
 
   // Verify token contracts
-  const codeA = await provider.getCode(cfg.tokenA)
-  const codeB = await provider.getCode(cfg.tokenB)
+  const codeA = await publicClient.getBytecode({ address: cfg.tokenA })
+  const codeB = await publicClient.getBytecode({ address: cfg.tokenB })
   if (!codeA || codeA === '0x') console.error('WARN: tokenA code not found at', cfg.tokenA)
   if (!codeB || codeB === '0x') console.error('WARN: tokenB code not found at', cfg.tokenB)
 
   // Support tokens
-  try { await (await amm.setTokenSupport(cfg.tokenA, true)).wait() } catch {}
-  try { await (await amm.setTokenSupport(cfg.tokenB, true)).wait() } catch {}
+  try {
+    const hash = await walletClient.writeContract({ address: cfg.amm, abi: AMM_ABI, functionName: 'setTokenSupport', args: [cfg.tokenA, true] })
+    await publicClient.waitForTransactionReceipt({ hash })
+  } catch {}
+  try {
+    const hash = await walletClient.writeContract({ address: cfg.amm, abi: AMM_ABI, functionName: 'setTokenSupport', args: [cfg.tokenB, true] })
+    await publicClient.waitForTransactionReceipt({ hash })
+  } catch {}
 
   // Sort pair (token0 < token1)
-  const [t0, t1] = cfg.tokenA.toLowerCase() < cfg.tokenB.toLowerCase()
-    ? [cfg.tokenA, cfg.tokenB]
-    : [cfg.tokenB, cfg.tokenA]
+  const tokenAAddr = getAddress(cfg.tokenA)
+  const tokenBAddr = getAddress(cfg.tokenB)
+  const [t0, t1] = tokenAAddr.toLowerCase() < tokenBAddr.toLowerCase() ? [tokenAAddr, tokenBAddr] : [tokenBAddr, tokenAAddr]
   console.log('Pair token0/token1:', t0, t1)
 
   // Create pool if missing
   let pool
   try {
-    pool = await amm.getPool(t0, t1)
+    pool = await publicClient.readContract({ address: cfg.amm, abi: AMM_ABI, functionName: 'getPool', args: [t0, t1] })
     console.log('Pool struct:', pool)
   } catch {}
   if (!pool || !pool.exists) {
     try {
-      const owner = await amm.owner().catch(() => null)
+      const owner = ammOwner || await publicClient.readContract({ address: cfg.amm, abi: AMM_ABI, functionName: 'owner' }).catch(() => null)
       if (owner && owner.toLowerCase() !== me.toLowerCase()) {
         console.warn('Warning: caller is not AMM owner. createPool may revert.')
       }
       console.log('Creating pool...')
-      const tx = await amm.createPool(t0, t1)
-      await tx.wait()
+      const hash = await walletClient.writeContract({ address: cfg.amm, abi: AMM_ABI, functionName: 'createPool', args: [t0, t1] })
+      await publicClient.waitForTransactionReceipt({ hash })
       console.log('Pool created')
     } catch (e) {
       console.error('createPool failed:', e?.shortMessage || e?.message || e)
@@ -112,40 +152,56 @@ async function ensurePoolAndLiquidity(name, cfg) {
   }
 
   // Prepare amounts via decimals
-  const tokenA = new ethers.Contract(cfg.tokenA, ERC20_ABI, wallet)
-  const tokenB = new ethers.Contract(cfg.tokenB, ERC20_ABI, wallet)
-  const decA = await tokenA.decimals().catch(() => 18)
-  const decB = await tokenB.decimals().catch(() => 6)
-  const amtA = ethers.parseUnits(process.env.SEED_ETH || '0.05', decA)
-  const amtB = ethers.parseUnits(process.env.SEED_USDC || '150', decB)
+  const decA = await publicClient.readContract({ address: tokenAAddr, abi: ERC20_ABI, functionName: 'decimals' }).catch(() => 18)
+  const decB = await publicClient.readContract({ address: tokenBAddr, abi: ERC20_ABI, functionName: 'decimals' }).catch(() => 6)
+  const amtA = parseUnits(process.env.SEED_ETH || '0.05', decA)
+  const amtB = parseUnits(process.env.SEED_USDC || '150', decB)
 
   // Mint/ensure balances
-  let balA = await tokenA.balanceOf(me)
+  let balA = await publicClient.readContract({ address: tokenAAddr, abi: ERC20_ABI, functionName: 'balanceOf', args: [me] })
   if (balA < amtA) {
     console.log('Trying to mint tokenA (TestETH)...')
-    try { const tx = await tokenA.mint(me, amtA - balA); await tx.wait() } catch {}
-    balA = await tokenA.balanceOf(me)
+    try {
+      const hash = await walletClient.writeContract({ address: tokenAAddr, abi: ERC20_ABI, functionName: 'mint', args: [me, amtA - balA] })
+      await publicClient.waitForTransactionReceipt({ hash })
+    } catch {}
+    balA = await publicClient.readContract({ address: tokenAAddr, abi: ERC20_ABI, functionName: 'balanceOf', args: [me] })
   }
-  let balB = await tokenB.balanceOf(me)
+  let balB = await publicClient.readContract({ address: tokenBAddr, abi: ERC20_ABI, functionName: 'balanceOf', args: [me] })
   if (balB < amtB) {
     console.log('Trying to mint tokenB (USDC)...')
-    try { const tx = await tokenB.mint(me, amtB - balB); await tx.wait() } catch {}
-    balB = await tokenB.balanceOf(me)
+    try {
+      const hash = await walletClient.writeContract({ address: tokenBAddr, abi: ERC20_ABI, functionName: 'mint', args: [me, amtB - balB] })
+      await publicClient.waitForTransactionReceipt({ hash })
+    } catch {}
+    balB = await publicClient.readContract({ address: tokenBAddr, abi: ERC20_ABI, functionName: 'balanceOf', args: [me] })
   }
 
   // Approvals
-  const allowA = await tokenA.allowance(me, cfg.amm).catch(() => 0n)
-  if (allowA < amtA) { console.log('Approving tokenA...'); await (await tokenA.approve(cfg.amm, amtA)).wait() }
-  const allowB = await tokenB.allowance(me, cfg.amm).catch(() => 0n)
-  if (allowB < amtB) { console.log('Approving tokenB...'); await (await tokenB.approve(cfg.amm, amtB)).wait() }
+  const allowA = await publicClient.readContract({ address: tokenAAddr, abi: ERC20_ABI, functionName: 'allowance', args: [me, cfg.amm] }).catch(() => 0n)
+  if (allowA < amtA) {
+    console.log('Approving tokenA...')
+    const hash = await walletClient.writeContract({ address: tokenAAddr, abi: ERC20_ABI, functionName: 'approve', args: [cfg.amm, amtA] })
+    await publicClient.waitForTransactionReceipt({ hash })
+  }
+  const allowB = await publicClient.readContract({ address: tokenBAddr, abi: ERC20_ABI, functionName: 'allowance', args: [me, cfg.amm] }).catch(() => 0n)
+  if (allowB < amtB) {
+    console.log('Approving tokenB...')
+    const hash = await walletClient.writeContract({ address: tokenBAddr, abi: ERC20_ABI, functionName: 'approve', args: [cfg.amm, amtB] })
+    await publicClient.waitForTransactionReceipt({ hash })
+  }
 
   // Add liquidity
   console.log('Adding liquidity...')
-  const amt0 = t0.toLowerCase() === cfg.tokenA.toLowerCase() ? amtA : amtB
-  const amt1 = t1.toLowerCase() === cfg.tokenB.toLowerCase() ? amtB : amtA
-  const tx = await amm.addLiquidity(t0, t1, amt0, amt1, 0, 0)
-  const rc = await tx.wait()
-  console.log('Liquidity added. tx:', rc?.hash)
+  const amt0 = t0 === tokenAAddr ? (tokenAAddr === cfg.tokenA ? amtA : amtB) : (t0 === tokenBAddr ? (tokenBAddr === cfg.tokenA ? amtA : amtB) : amtA)
+  const amt1 = t1 === tokenBAddr ? (tokenBAddr === cfg.tokenB ? amtB : amtA) : (t1 === tokenAAddr ? (tokenAAddr === cfg.tokenB ? amtB : amtA) : amtB)
+  try {
+    const hash = await walletClient.writeContract({ address: cfg.amm, abi: AMM_ABI, functionName: 'addLiquidity', args: [t0, t1, amt0, amt1, 0n, 0n] })
+    await publicClient.waitForTransactionReceipt({ hash })
+    console.log('Liquidity added. tx:', hash)
+  } catch (e) {
+    console.error('addLiquidity failed:', e?.shortMessage || e?.message || e)
+  }
 }
 
 for (const [name, cfg] of Object.entries(CHAINS)) {

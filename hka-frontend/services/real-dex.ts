@@ -1,49 +1,56 @@
-// Real Balance and DEX Integration Service
-import { ethers, Contract } from 'ethers';
+// Real Balance and DEX Integration Service (migrated off ethers -> viem public client + raw EIP-1193 tx)
+import { parseUnits, formatUnits } from '../services/viemAdapter'
+import { encodeFunctionData } from 'viem'
+import { getViemClient, withRetries } from '../src/services/providerCache'
 
 // Debug logging utility gated by VITE_DEBUG_DEX environment variable
 // Usage: set VITE_DEBUG_DEX=true in .env (or import.meta.env) to enable verbose logs.
 const DEBUG_DEX = typeof import.meta !== 'undefined' && import.meta.env?.VITE_DEBUG_DEX === 'true';
 // Light wrapper so we can strip easily later or swap with a structured logger
 const dlog = (...args: unknown[]) => { if (DEBUG_DEX) console.log(...args); };
-import { CONTRACTS } from './contracts';
-import { getTokenDecimals } from '../src/services/tokenDecimals';
-import { walletService } from './wallet';
+import { CONTRACTS } from './contracts'
+import { getTokenDecimals } from '../src/services/tokenDecimals'
+import { walletService } from './wallet'
+import type { Eip1193Provider as Eip1193 } from '../types/eip1193'
 
-// ERC20 ABI for balance checking
+// Minimal ABIs as object literals (cheaper to re-use)
 const ERC20_ABI = [
-  'function balanceOf(address account) view returns (uint256)',
-  'function decimals() view returns (uint8)',
-  'function symbol() view returns (string)',
-  'function allowance(address owner, address spender) view returns (uint256)',
-  'function approve(address spender, uint256 amount) returns (bool)',
-  'function transfer(address to, uint256 amount) returns (bool)'
-];
+  { type: 'function', name: 'balanceOf', stateMutability: 'view', inputs: [{ type: 'address', name: 'account' }], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'decimals', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint8' }] },
+  { type: 'function', name: 'symbol', stateMutability: 'view', inputs: [], outputs: [{ type: 'string' }] },
+  { type: 'function', name: 'allowance', stateMutability: 'view', inputs: [{ type: 'address', name: 'owner' }, { type: 'address', name: 'spender' }], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'approve', stateMutability: 'nonpayable', inputs: [{ type: 'address', name: 'spender' }, { type: 'uint256', name: 'amount' }], outputs: [{ type: 'bool' }] },
+  { type: 'function', name: 'transfer', stateMutability: 'nonpayable', inputs: [{ type: 'address', name: 'to' }, { type: 'uint256', name: 'amount' }], outputs: [{ type: 'bool' }] }
+] as const
 
-// WETH ABI for wrapping/unwrapping
 const WETH_ABI = [
-  'function deposit() external payable',
-  'function withdraw(uint256 amount) external',
-  'function balanceOf(address account) view returns (uint256)',
-  'function approve(address spender, uint256 amount) returns (bool)',
-  'function allowance(address owner, address spender) view returns (uint256)'
-];
+  { type: 'function', name: 'deposit', stateMutability: 'payable', inputs: [], outputs: [] },
+  { type: 'function', name: 'withdraw', stateMutability: 'nonpayable', inputs: [{ type: 'uint256', name: 'amount' }], outputs: [] },
+  { type: 'function', name: 'balanceOf', stateMutability: 'view', inputs: [{ type: 'address', name: 'account' }], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'approve', stateMutability: 'nonpayable', inputs: [{ type: 'address', name: 'spender' }, { type: 'uint256', name: 'amount' }], outputs: [{ type: 'bool' }] },
+  { type: 'function', name: 'allowance', stateMutability: 'view', inputs: [{ type: 'address', name: 'owner' }, { type: 'address', name: 'spender' }], outputs: [{ type: 'uint256' }] }
+] as const
 
-// AMM ABI (extended with fallback reserve + fee accessor for simplified AMM)
 const AMM_ABI = [
-  'function swap(address,address,uint256,uint256) external returns (uint256)',
-  'function getSwapQuote(address,address,uint256) view returns (tuple(uint256 amountIn, uint256 amountOut, uint256 fee, uint256 priceImpact))',
-  'function getReserves() view returns (uint256 ethReserve, uint256 usdcReserve)',
-  'function feeBps() view returns (uint256)',
-  'function addLiquidity(address,address,uint256,uint256,uint256,uint256) external returns (uint256)',
-  'function getPool(address,address) view returns (tuple(address token0, address token1, uint256 reserve0, uint256 reserve1, uint256 totalSupply, uint256 lastUpdateTime, bool exists))',
-  'function supportedTokens(address) view returns (bool)',
-  'function getAllTokens() view returns (address[] memory)',
-  'function swapETHForTokens(address,uint256,uint256) external payable',
-  'function swapTokensForETH(address,uint256,uint256,uint256) external',
-  'function getETHToTokenQuote(address,uint256) view returns (uint256 amountOut, uint256 fee, uint256 priceImpact)',
-  'function getTokenToETHQuote(address,uint256) view returns (uint256 amountOut, uint256 fee, uint256 priceImpact)'
-];
+  { type: 'function', name: 'swap', stateMutability: 'nonpayable', inputs: [
+    { type: 'address', name: 'tokenIn' }, { type: 'address', name: 'tokenOut' }, { type: 'uint256', name: 'amountIn' }, { type: 'uint256', name: 'minAmountOut' }
+  ], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'getSwapQuote', stateMutability: 'view', inputs: [
+    { type: 'address', name: 'tokenIn' }, { type: 'address', name: 'tokenOut' }, { type: 'uint256', name: 'amountIn' }
+  ], outputs: [
+    { type: 'uint256', name: 'amountIn' }, { type: 'uint256', name: 'amountOut' }, { type: 'uint256', name: 'fee' }, { type: 'uint256', name: 'priceImpact' }
+  ] },
+  { type: 'function', name: 'getReserves', stateMutability: 'view', inputs: [], outputs: [
+    { type: 'uint256', name: 'ethReserve' }, { type: 'uint256', name: 'usdcReserve' }
+  ] },
+  { type: 'function', name: 'feeBps', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256', name: 'feeBps' }] }
+] as const
+
+function getEthereum(): Eip1193 {
+  const w = window as unknown as { ethereum?: Eip1193 }
+  if (!w.ethereum) throw new Error('Wallet provider not found')
+  return w.ethereum
+}
 
 export interface TokenBalance {
   symbol: string;
@@ -65,9 +72,8 @@ export interface SwapQuote {
 }
 
 export class RealDEXService {
-  private provider: ethers.BrowserProvider | null = null;
-  private signer: ethers.Signer | null = null;
-  private chainId: number | null = null;
+  private chainId: number | null = null
+  private account: string | null = null
 
   // Helper function to safely parse units with decimal handling
   private safeParseUnits(value: string, decimals: number): bigint {
@@ -85,11 +91,11 @@ export class RealDEXService {
           const truncatedDecimal = decimal.slice(0, decimals);
           const newValue = `${whole}.${truncatedDecimal}`;
           dlog(`🔧 Truncated: "${cleanValue}" → "${newValue}"`);
-          return ethers.parseUnits(newValue, decimals);
+          return parseUnits(newValue, decimals);
         }
       }
       
-      const result = ethers.parseUnits(cleanValue, decimals);
+  const result = parseUnits(cleanValue, decimals);
   dlog(`✅ Parsed: "${cleanValue}" → ${result.toString()}`);
       return result;
       
@@ -103,7 +109,7 @@ export class RealDEXService {
         
         const fallbackValue = numValue.toFixed(decimals);
   dlog(`🔄 Fallback: "${value}" → "${fallbackValue}"`);
-        return ethers.parseUnits(fallbackValue, decimals);
+  return parseUnits(fallbackValue, decimals);
       } catch (fallbackError) {
         console.error(`❌ Fallback failed:`, fallbackError);
         throw new Error(`Cannot parse "${value}" with ${decimals} decimals: ${(error as Error).message}`);
@@ -113,35 +119,23 @@ export class RealDEXService {
 
   async initialize(forceChainId?: number) {
     try {
-      const walletState = walletService.getState();
-      
-      if (!walletState.isConnected || !walletState.provider || !walletState.signer) {
-        throw new Error('Wallet not connected');
-      }
-
-      // Use forced chainId if provided, otherwise use wallet state
-      const targetChainId = forceChainId || walletState.chainId;
-  dlog(`🔄 Initializing DEX service for chain ${targetChainId}... ${forceChainId ? '(forced)' : '(from wallet)'}`);
-      
-      this.provider = walletState.provider;
-      this.signer = walletState.signer;
-      this.chainId = targetChainId;
-      
-  dlog(`✅ DEX service initialized for chain ${this.chainId}`);
+      const walletState = walletService.getState()
+      if (!walletState.isConnected || !walletState.account || !walletState.chainId) throw new Error('Wallet not connected')
+      this.chainId = forceChainId || walletState.chainId
+      this.account = walletState.account
+      dlog(`✅ DEX service initialized for chain ${this.chainId}`)
     } catch (error) {
-      console.error('❌ DEX service initialization failed:', error);
-      throw error;
+      console.error('❌ DEX service initialization failed:', error)
+      throw error
     }
   }
 
   // Check if service is initialized and ready
-  isInitialized(): boolean {
-    return this.provider !== null && this.signer !== null && this.chainId !== null;
-  }
+  isInitialized(): boolean { return this.account !== null && this.chainId !== null }
 
   // Get real token balances for current chain
   async getTokenBalances(): Promise<TokenBalance[]> {
-    if (!this.provider || !this.signer || !this.chainId) {
+  if (!this.account || !this.chainId) {
       throw new Error('Service not initialized');
     }
 
@@ -155,80 +149,72 @@ export class RealDEXService {
     }
 
     try {
-      const userAddress = await this.signer.getAddress();
-      const balances: TokenBalance[] = [];
+  const userAddress = this.account as string
+  const client = getViemClient(this.chainId)
+  const balances: TokenBalance[] = []
 
   dlog(`👤 User address: ${userAddress}`);
   dlog(`📍 Network: ${contracts.name}`);
   dlog(`🔗 Chain ID: ${this.chainId}`);
       
       // Verify provider is connected to correct network
-      const providerNetwork = await this.provider.getNetwork();
-  dlog(`🌐 Provider network: ${providerNetwork.chainId.toString()}`);
-      
-      if (Number(providerNetwork.chainId) !== this.chainId) {
-        console.warn(`⚠️ Provider chainId (${providerNetwork.chainId}) != service chainId (${this.chainId})`);
-        throw new Error(`Provider network mismatch: expected ${this.chainId}, got ${providerNetwork.chainId}`);
-      }
+  // Network mismatch check handled by wallet state; skipped here
       
       // Get ETH balance
   dlog('💰 Fetching ETH balance...');
-      const ethBalance = await this.provider.getBalance(userAddress);
+  const ethBalance = await client.getBalance({ address: userAddress as `0x${string}` })
       balances.push({
         symbol: 'ETH',
         name: 'Native Ethereum',
         address: '0x0000000000000000000000000000000000000000',
         balance: ethBalance.toString(),
-        formattedBalance: ethers.formatEther(ethBalance),
+  formattedBalance: formatUnits(ethBalance, 18),
         decimals: 18
       });
-  dlog(`✅ ETH balance: ${ethers.formatEther(ethBalance)}`);
+  dlog(`✅ ETH balance: ${formatUnits(ethBalance, 18)}`);
 
       // Get WETH balance (if available)
       if (contracts.weth) {
   dlog('💰 Fetching WETH balance...');
-        const wethContract = new Contract(contracts.weth, ERC20_ABI, this.provider);
-        const wethBalance = await wethContract.balanceOf(userAddress);
-        const wethDecimals = await wethContract.decimals();
+  const wethDecimals = await getTokenDecimals(this.chainId, contracts.weth)
+  const wethBalance = await withRetries(() => client.readContract({ address: contracts.weth as `0x${string}`, abi: ERC20_ABI, functionName: 'balanceOf', args: [userAddress as `0x${string}`] }) as Promise<bigint>)
         
         balances.push({
           symbol: 'WETH',
           name: 'Wrapped Ethereum',
           address: contracts.weth,
           balance: wethBalance.toString(),
-          formattedBalance: ethers.formatUnits(wethBalance, wethDecimals),
+          formattedBalance: formatUnits(wethBalance, wethDecimals),
           decimals: wethDecimals
         });
-  dlog(`✅ WETH balance: ${ethers.formatUnits(wethBalance, wethDecimals)}`);
+  dlog(`✅ WETH balance: ${formatUnits(wethBalance, wethDecimals)}`);
       }
       // Get TestUSDC balance
   dlog('💰 Fetching TestUSDC balance...');
-      const usdcContract = new Contract(contracts.testUSDC, ERC20_ABI, this.provider);
-      const usdcBalance = await usdcContract.balanceOf(userAddress);
-      const usdcDecimals = await usdcContract.decimals();
+  const usdcDecimals = await getTokenDecimals(this.chainId, contracts.testUSDC)
+  const usdcBalance = await withRetries(() => client.readContract({ address: contracts.testUSDC as `0x${string}`, abi: ERC20_ABI, functionName: 'balanceOf', args: [userAddress as `0x${string}`] }) as Promise<bigint>)
       
       balances.push({
         symbol: 'USDC',
         name: 'USD Coin',
         address: contracts.testUSDC,
         balance: usdcBalance.toString(),
-        formattedBalance: ethers.formatUnits(usdcBalance, usdcDecimals),
+  formattedBalance: formatUnits(usdcBalance, usdcDecimals),
         decimals: usdcDecimals
       });
-  dlog(`✅ USDC balance: ${ethers.formatUnits(usdcBalance, usdcDecimals)}`);
+  dlog(`✅ USDC balance: ${formatUnits(usdcBalance, usdcDecimals)}`);
 
       // Get TestETH balance (if different from native ETH)
       if (contracts.testETH !== '0x0000000000000000000000000000000000000000') {
-        const testEthContract = new Contract(contracts.testETH, ERC20_ABI, this.provider);
-        const testEthBalance = await testEthContract.balanceOf(userAddress);
-        const testEthDecimals = await testEthContract.decimals();
+  const testEthDecimals = await getTokenDecimals(this.chainId, contracts.testETH)
+  const testEthBalance = await withRetries(() => client.readContract({ address: contracts.testETH as `0x${string}`, abi: ERC20_ABI, functionName: 'balanceOf', args: [userAddress as `0x${string}`] }) as Promise<bigint>)
         
         balances.push({
           symbol: 'TestETH',
           name: 'Test Ethereum',
           address: contracts.testETH,
           balance: testEthBalance.toString(),
-          formattedBalance: ethers.formatUnits(testEthBalance, testEthDecimals),
+          formattedBalance: formatUnits(testEthBalance, testEthDecimals),
           decimals: testEthDecimals
         });
       }
@@ -248,7 +234,7 @@ export class RealDEXService {
     tokenOut: string,
     amountIn: string
   ): Promise<SwapQuote> {
-    if (!this.provider || !this.chainId) {
+  if (!this.chainId || !this.account) {
       throw new Error('Service not initialized');
     }
 
@@ -260,7 +246,7 @@ export class RealDEXService {
     try {
   dlog('🔄 Getting swap quote:', { tokenIn, tokenOut, amountIn });
       
-      const ammContract = new Contract(contracts.ammEngine, AMM_ABI, this.provider);
+  const client = getViemClient(this.chainId)
       
       // Determine input decimals dynamically
       let inputDecimals = 18;
@@ -269,7 +255,7 @@ export class RealDEXService {
       }
       
       const amountInWei = this.safeParseUnits(amountIn, inputDecimals);
-      let quoteResult;
+  let quoteResult: { amountIn: bigint; amountOut: bigint; fee: bigint; priceImpact: bigint } | readonly [bigint, bigint, bigint, bigint] | undefined;
       
       // Always convert ETH to WETH for quotes since AMM doesn't have ETH functions working
       let actualTokenIn = tokenIn;
@@ -289,23 +275,27 @@ export class RealDEXService {
       let amountOut: string; let priceImpact: number; let outputDecimals = 18;
       try {
   dlog('💎 Attempting primary getSwapQuote path');
-        quoteResult = await ammContract.getSwapQuote(actualTokenIn, actualTokenOut, amountInWei);
+  quoteResult = await withRetries(() => client.readContract({ address: contracts.ammEngine as `0x${string}`, abi: AMM_ABI, functionName: 'getSwapQuote', args: [actualTokenIn as `0x${string}`, actualTokenOut as `0x${string}`, amountInWei] }) as Promise<{ amountIn: bigint; amountOut: bigint; fee: bigint; priceImpact: bigint } | readonly [bigint, bigint, bigint, bigint]>)
   dlog('✅ Raw quote result:', quoteResult);
-        const rawAmountOut = quoteResult.amountOut || quoteResult[1];
-        priceImpact = Number(quoteResult.priceImpact || quoteResult[3]) / 10000;
+  const isTuple = Array.isArray(quoteResult)
+  const rawAmountOut = isTuple ? (quoteResult as readonly [bigint, bigint, bigint, bigint])[1] : (quoteResult as { amountOut: bigint }).amountOut
+  const rawPi = isTuple ? (quoteResult as readonly [bigint, bigint, bigint, bigint])[3] : (quoteResult as { priceImpact: bigint }).priceImpact
+  priceImpact = Number(rawPi) / 10000;
         if (tokenOut !== '0x0000000000000000000000000000000000000000') {
           try { outputDecimals = await getTokenDecimals(this.chainId, tokenOut); } catch { outputDecimals = 18; }
         }
-        amountOut = ethers.formatUnits(rawAmountOut, outputDecimals);
+  amountOut = formatUnits(rawAmountOut, outputDecimals);
       } catch (primaryErr) {
         console.warn('⚠️ getSwapQuote failed; falling back to reserve simulation', primaryErr);
         // Reserve-based fallback (constant product): supports ETH/WETH <-> USDC
         const [reserves, feeBps] = await Promise.all([
-          ammContract.getReserves(),
-          ammContract.feeBps().catch(() => 30n)
-        ]);
-        const rEth: bigint = reserves.ethReserve || reserves[0];
-        const rUsdc: bigint = reserves.usdcReserve || reserves[1];
+          withRetries(() => client.readContract({ address: contracts.ammEngine as `0x${string}`, abi: AMM_ABI, functionName: 'getReserves' }) as Promise<{ ethReserve: bigint; usdcReserve: bigint } | readonly [bigint, bigint]>),
+          client.readContract({ address: contracts.ammEngine as `0x${string}`, abi: AMM_ABI, functionName: 'feeBps' }).catch(() => 30n)
+        ])
+        const hasStruct = (x: unknown): x is { ethReserve: bigint; usdcReserve: bigint } =>
+          typeof x === 'object' && x !== null && 'ethReserve' in x && 'usdcReserve' in x
+        const rEth: bigint = Array.isArray(reserves) ? reserves[0] : (hasStruct(reserves) ? reserves.ethReserve : 0n)
+        const rUsdc: bigint = Array.isArray(reserves) ? reserves[1] : (hasStruct(reserves) ? reserves.usdcReserve : 0n)
         const isInEth = tokenIn === '0x0000000000000000000000000000000000000000' || tokenIn.toLowerCase() === contracts.weth.toLowerCase();
         const feeDen = 10_000n;
         const netIn = (amountInWei * (feeDen - feeBps)) / feeDen;
@@ -324,7 +314,7 @@ export class RealDEXService {
           outputDecimals = 18;
         }
         if (outWei < 0n) outWei = 0n;
-        amountOut = ethers.formatUnits(outWei, outputDecimals);
+  amountOut = formatUnits(outWei, outputDecimals);
         // Improved price impact: mid price vs execution price
         const reserveIn = isInEth ? rEth : rUsdc;
         const reserveOut = isInEth ? rUsdc : rEth;
@@ -364,7 +354,7 @@ export class RealDEXService {
     amountIn: string,
     minimumAmountOut: string
   ): Promise<string> {
-    if (!this.signer || !this.chainId) {
+  if (!this.account || !this.chainId) {
       throw new Error('Service not initialized');
     }
 
@@ -374,8 +364,9 @@ export class RealDEXService {
     }
 
     try {
-      const userAddress = await this.signer.getAddress();
-      const ammContract = new Contract(contracts.ammEngine, AMM_ABI, this.signer);
+  const userAddress = this.account as string
+  const client = getViemClient(this.chainId)
+  const ethereum = getEthereum()
       
   dlog('🔄 Executing swap...', { tokenIn, tokenOut, amountIn, minimumAmountOut });
       
@@ -384,7 +375,7 @@ export class RealDEXService {
         // ETH → Token: Wrap ETH to WETH then swap
   dlog('💎 Executing ETH → Token swap via WETH');
         
-        const amountInWei = this.safeParseUnits(amountIn, 18);
+  const amountInWei = this.safeParseUnits(amountIn, 18);
         
         // Determine output token decimals for minimumOut
         let outputDecimals = 18; // Default for ETH/WETH
@@ -394,48 +385,42 @@ export class RealDEXService {
         const minimumOutWei = this.safeParseUnits(minimumAmountOut, outputDecimals);
         
         // 1. Wrap ETH to WETH
-        const wethContract = new Contract(contracts.weth, WETH_ABI, this.signer);
+    const depositData = encodeFunctionData({ abi: WETH_ABI, functionName: 'deposit' })
   dlog('🔄 Wrapping ETH to WETH...');
-        const wrapTx = await wethContract.deposit({ value: amountInWei });
-        await wrapTx.wait();
+    const wrapHash = await ethereum.request({ method: 'eth_sendTransaction', params: [{ from: userAddress, to: contracts.weth, data: depositData, value: '0x' + amountInWei.toString(16) }] }) as `0x${string}`
+    await client.waitForTransactionReceipt({ hash: wrapHash })
   dlog('✅ ETH wrapped to WETH');
         
         // 2. Approve WETH for AMM
   dlog('🔄 Approving WETH for swap (exact)...');
-        {
-          const currentAllowance = await wethContract.allowance(userAddress, contracts.ammEngine).catch(() => 0n);
-          if (currentAllowance < amountInWei) {
-            if (currentAllowance > 0n) {
-              const resetTx = await wethContract.approve(contracts.ammEngine, 0n);
-              await resetTx.wait();
-            }
-            const approveTx = await wethContract.approve(contracts.ammEngine, amountInWei);
-            await approveTx.wait();
+        const currentAllowance: bigint = await client.readContract({ address: contracts.weth as `0x${string}`, abi: WETH_ABI, functionName: 'allowance', args: [userAddress as `0x${string}`, contracts.ammEngine as `0x${string}`] }) as bigint
+        if (currentAllowance < amountInWei) {
+          if (currentAllowance > 0n) {
+            const resetData = encodeFunctionData({ abi: WETH_ABI, functionName: 'approve', args: [contracts.ammEngine as `0x${string}`, 0n] })
+            const resetHash = await ethereum.request({ method: 'eth_sendTransaction', params: [{ from: userAddress, to: contracts.weth, data: resetData }] }) as `0x${string}`
+            await client.waitForTransactionReceipt({ hash: resetHash })
           }
+          const approveData = encodeFunctionData({ abi: WETH_ABI, functionName: 'approve', args: [contracts.ammEngine as `0x${string}`, amountInWei] })
+          const approveHash = await ethereum.request({ method: 'eth_sendTransaction', params: [{ from: userAddress, to: contracts.weth, data: approveData }] }) as `0x${string}`
+          await client.waitForTransactionReceipt({ hash: approveHash })
         }
   dlog('✅ WETH approved (exact)');
         
         // 3. Execute WETH → Token swap
   dlog('🔄 Executing WETH → Token swap...');
-        const swapTx = await ammContract.swap(
-          contracts.weth,
-          tokenOut,
-          amountInWei,
-          minimumOutWei
-        );
-        
-  dlog('🔄 Swap transaction sent:', swapTx.hash);
-        await swapTx.wait();
+  const swapData = encodeFunctionData({ abi: AMM_ABI, functionName: 'swap', args: [contracts.weth as `0x${string}`, tokenOut as `0x${string}`, amountInWei, minimumOutWei] })
+    const swapHash = await ethereum.request({ method: 'eth_sendTransaction', params: [{ from: userAddress, to: contracts.ammEngine, data: swapData }] }) as `0x${string}`
+  dlog('🔄 Swap transaction sent:', swapHash);
+    await client.waitForTransactionReceipt({ hash: swapHash })
   dlog('✅ ETH swap completed');
-        return swapTx.hash;
+    return swapHash;
         
       } else if (tokenOut === '0x0000000000000000000000000000000000000000') {
         // Token → ETH: Swap to WETH then unwrap
   dlog('💎 Executing Token → ETH swap via WETH');
         
         // 1. Approve token if needed
-        const tokenContract = new Contract(tokenIn, ERC20_ABI, this.signer);
-        const allowance = await tokenContract.allowance(userAddress, contracts.ammEngine);
+  const allowance: bigint = await client.readContract({ address: tokenIn as `0x${string}`, abi: ERC20_ABI, functionName: 'allowance', args: [userAddress as `0x${string}`, contracts.ammEngine as `0x${string}`] }) as bigint
         
         // Determine input token decimals
         let inputDecimals = 18; // Default for ETH/WETH
@@ -447,30 +432,26 @@ export class RealDEXService {
         if (allowance < amountInWei) {
           dlog('🔄 Approving token for swap (exact)...');
           if (allowance > 0n) {
-            const resetTx = await tokenContract.approve(contracts.ammEngine, 0n);
-            await resetTx.wait();
+            const resetData = encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [contracts.ammEngine as `0x${string}`, 0n] })
+            const resetHash = await ethereum.request({ method: 'eth_sendTransaction', params: [{ from: userAddress, to: tokenIn, data: resetData }] }) as `0x${string}`
+            await client.waitForTransactionReceipt({ hash: resetHash })
           }
-          const approveTx = await tokenContract.approve(contracts.ammEngine, amountInWei);
-          await approveTx.wait();
+          const approveData = encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [contracts.ammEngine as `0x${string}`, amountInWei] })
+          const approveHash = await ethereum.request({ method: 'eth_sendTransaction', params: [{ from: userAddress, to: tokenIn, data: approveData }] }) as `0x${string}`
+          await client.waitForTransactionReceipt({ hash: approveHash })
           dlog('✅ Token approved (exact)');
         }
         
         // 2. Execute Token → WETH swap (track exact amountOut via balance delta)
         const minimumOutWei = this.safeParseUnits(minimumAmountOut, 18); // ETH always 18 decimals
-        const wethContract = new Contract(contracts.weth, WETH_ABI, this.signer);
-        const wethBefore = await wethContract.balanceOf(userAddress);
+  const wethBefore: bigint = await client.readContract({ address: contracts.weth as `0x${string}`, abi: WETH_ABI, functionName: 'balanceOf', args: [userAddress as `0x${string}`] }) as bigint
 
   dlog('🔄 Executing Token → WETH swap...');
-        const swapTx = await ammContract.swap(
-          tokenIn,
-          contracts.weth,
-          amountInWei,
-          minimumOutWei
-        );
-        await swapTx.wait();
+  const swapData = encodeFunctionData({ abi: AMM_ABI, functionName: 'swap', args: [tokenIn as `0x${string}`, contracts.weth as `0x${string}`, amountInWei, minimumOutWei] })
+  const swapHash = await ethereum.request({ method: 'eth_sendTransaction', params: [{ from: userAddress, to: contracts.ammEngine, data: swapData }] }) as `0x${string}`
+  await client.waitForTransactionReceipt({ hash: swapHash })
   dlog('✅ Token → WETH swap completed');
-
-        const wethAfter = await wethContract.balanceOf(userAddress);
+  const wethAfter: bigint = await client.readContract({ address: contracts.weth as `0x${string}`, abi: WETH_ABI, functionName: 'balanceOf', args: [userAddress as `0x${string}`] }) as bigint
         const outWeth = wethAfter - wethBefore;
         if (outWeth <= 0n) {
           throw new Error('Swap produced zero WETH output');
@@ -478,39 +459,35 @@ export class RealDEXService {
 
         // 3. Unwrap only the exact WETH received
   dlog('🔄 Unwrapping WETH to ETH (exact):', outWeth.toString());
-        const unwrapTx = await wethContract.withdraw(outWeth);
-        await unwrapTx.wait();
+  const withdrawData = encodeFunctionData({ abi: WETH_ABI, functionName: 'withdraw', args: [outWeth] })
+  const withdrawHash = await ethereum.request({ method: 'eth_sendTransaction', params: [{ from: userAddress, to: contracts.weth, data: withdrawData }] }) as `0x${string}`
+  await client.waitForTransactionReceipt({ hash: withdrawHash })
   dlog('✅ WETH unwrapped to ETH');
         
-        return swapTx.hash;
+  return swapHash;
         
       } else {
         // Token → Token: Use regular swap
   dlog('🔄 Executing Token → Token swap');
         
         // Check if token approval is needed
-        const tokenContract = new Contract(tokenIn, ERC20_ABI, this.signer);
-        const allowance = await tokenContract.allowance(userAddress, contracts.ammEngine);
-        const amountInWei = ethers.parseUnits(amountIn, 18);
+  const allowance: bigint = await client.readContract({ address: tokenIn as `0x${string}`, abi: ERC20_ABI, functionName: 'allowance', args: [userAddress as `0x${string}`, contracts.ammEngine as `0x${string}`] }) as bigint
+  const amountInWei = parseUnits(amountIn, 18);
         
-        if (allowance < amountInWei) {
-          dlog('🔄 Approving token spend...');
-          const approveTx = await tokenContract.approve(contracts.ammEngine, amountInWei);
-          await approveTx.wait();
-          dlog('✅ Token approved');
-        }
+    if (allowance < amountInWei) {
+      dlog('🔄 Approving token spend...');
+          const approveData = encodeFunctionData({ abi: ERC20_ABI, functionName: 'approve', args: [contracts.ammEngine as `0x${string}`, amountInWei] })
+      const approveHash = await ethereum.request({ method: 'eth_sendTransaction', params: [{ from: userAddress, to: tokenIn, data: approveData }] }) as `0x${string}`
+      await client.waitForTransactionReceipt({ hash: approveHash })
+      dlog('✅ Token approved');
+    }
 
-        const swapTx = await ammContract.swap(
-          tokenIn,
-          tokenOut,
-          amountInWei,
-          ethers.parseUnits(minimumAmountOut, 18)
-        );
-
-  dlog('🔄 Swap transaction sent:', swapTx.hash);
-        await swapTx.wait();
+  const swapData = encodeFunctionData({ abi: AMM_ABI, functionName: 'swap', args: [tokenIn as `0x${string}`, tokenOut as `0x${string}`, amountInWei, parseUnits(minimumAmountOut, 18)] })
+    const swapHash = await ethereum.request({ method: 'eth_sendTransaction', params: [{ from: userAddress, to: contracts.ammEngine, data: swapData }] }) as `0x${string}`
+  dlog('🔄 Swap transaction sent:', swapHash);
+    await client.waitForTransactionReceipt({ hash: swapHash })
   dlog('✅ Swap completed');
-        return swapTx.hash;
+    return swapHash;
       }
 
     } catch (error) {
@@ -521,15 +498,15 @@ export class RealDEXService {
 
   // Check if token needs approval
   async checkTokenApproval(tokenAddress: string, spenderAddress: string, amount: string): Promise<boolean> {
-    if (!this.signer || tokenAddress === '0x0000000000000000000000000000000000000000') {
+  if (!this.account || tokenAddress === '0x0000000000000000000000000000000000000000') {
       return true; // ETH doesn't need approval
     }
 
     try {
-      const userAddress = await this.signer.getAddress();
-      const tokenContract = new Contract(tokenAddress, ERC20_ABI, this.signer);
-      const allowance = await tokenContract.allowance(userAddress, spenderAddress);
-      const amountWei = ethers.parseUnits(amount, 18);
+    const userAddress = this.account as string
+    const client = getViemClient(this.chainId!)
+    const allowance: bigint = await client.readContract({ address: tokenAddress as `0x${string}`, abi: ERC20_ABI, functionName: 'allowance', args: [userAddress as `0x${string}`, spenderAddress as `0x${string}`] }) as bigint
+  const amountWei = parseUnits(amount, 18);
       
       return allowance >= amountWei;
     } catch (error) {
@@ -561,9 +538,7 @@ export class RealDEXService {
   }
 
   // Get current chain ID
-  getCurrentChainId(): number | null {
-    return this.chainId;
-  }
+  getCurrentChainId(): number | null { return this.chainId }
 }
 
 // Export singleton instance

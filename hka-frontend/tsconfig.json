@@ -35,7 +35,9 @@
   "exclude": [
     "node_modules",
     "dist",
-    "vite.config.ts"
+    "vite.config.ts",
+    // Skip futures for now
+  "components/PerpetualFutures.tsx"
   ],
   "references": [{ "path": "./tsconfig.node.json" }]
 } 

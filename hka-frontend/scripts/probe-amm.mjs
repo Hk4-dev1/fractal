@@ -1,20 +1,39 @@
 #!/usr/bin/env node
 import dotenv from 'dotenv'
 import path from 'path'
-import { ethers } from 'ethers'
+import { createPublicClient, http, parseAbi, getAddress } from 'viem'
 dotenv.config({ path: path.resolve(process.cwd(), '.env'), override: true })
 
 const ERC20_ABI = [
   'function decimals() view returns (uint8)',
   'function symbol() view returns (string)',
 ]
-const AMM_NATIVE_ABI = [
-  'function getReserves() view returns (uint256,uint256)',
-  'function addLiquidity(uint256 usdcAmount) payable',
-]
+const AMM_NATIVE_ABI = parseAbi([
+  'function getReserves() view returns (uint256 reserve0,uint256 reserve1)',
+  'function addLiquidity(uint256 usdcAmount) payable'
+])
 const AMM_PAIR_ABI = [
-  'function getPool(address,address) view returns (tuple(address token0,address token1,uint256 reserve0,uint256 reserve1,uint256 totalSupply,uint256 lastUpdateTime,bool exists))',
-  'function addLiquidity(address,address,uint256,uint256,uint256,uint256) returns (uint256)',
+  ...parseAbi([
+    'function addLiquidity(address,address,uint256,uint256,uint256,uint256) returns (uint256)'
+  ]),
+  {
+    type: 'function',
+    name: 'getPool',
+    stateMutability: 'view',
+    inputs: [ { name: 'token0', type: 'address' }, { name: 'token1', type: 'address' } ],
+    outputs: [ {
+      type: 'tuple',
+      components: [
+        { name: 'token0', type: 'address' },
+        { name: 'token1', type: 'address' },
+        { name: 'reserve0', type: 'uint256' },
+        { name: 'reserve1', type: 'uint256' },
+        { name: 'totalSupply', type: 'uint256' },
+        { name: 'lastUpdateTime', type: 'uint256' },
+        { name: 'exists', type: 'bool' }
+      ]
+    } ]
+  }
 ]
 
 const CHAINS = {
@@ -29,33 +48,34 @@ function sortPair(a, b) {
 }
 
 async function classifyAndProbe(name, cfg) {
-  const provider = new ethers.JsonRpcProvider(cfg.rpc)
-  const code = await provider.getCode(cfg.amm)
+  const chain = { id: cfg.id, name, network: name, nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: [cfg.rpc] } } }
+  const client = createPublicClient({ chain, transport: http(cfg.rpc) })
+  const code = await client.getBytecode({ address: cfg.amm })
   if (!code || code === '0x') return { name, ok: false, reason: 'AMM code not found' }
 
   const out = { name, chainId: cfg.id, amm: cfg.amm, type: null, details: {} }
 
   // Try native AMM
   try {
-    const ammN = new ethers.Contract(cfg.amm, AMM_NATIVE_ABI, provider)
-    const [e, u] = await ammN.getReserves()
+    const [e, u] = await client.readContract({ address: cfg.amm, abi: AMM_NATIVE_ABI, functionName: 'getReserves' })
     out.type = 'native'
-    out.details.reserves = { eth: e.toString(), usdc: u.toString() }
+    out.details.reserves = { r0: e.toString(), r1: u.toString() }
     return out
   } catch {}
 
   // Try pair AMM
   try {
-    const ammP = new ethers.Contract(cfg.amm, AMM_PAIR_ABI, provider)
     const candidates = []
     if (cfg.weth) candidates.push(['WETH', cfg.weth, 'USDC', cfg.usdc])
     if (cfg.testeth) candidates.push(['TestETH', cfg.testeth, 'USDC', cfg.usdc])
     out.type = 'pair'
     out.details.pairs = []
     for (const [an, a, bn, b] of candidates) {
-      const [t0, t1] = sortPair(a, b)
+      const [t0raw, t1raw] = sortPair(a, b)
+      const t0 = getAddress(t0raw)
+      const t1 = getAddress(t1raw)
       let pool
-      try { pool = await ammP.getPool(t0, t1) } catch {}
+      try { pool = await client.readContract({ address: cfg.amm, abi: AMM_PAIR_ABI, functionName: 'getPool', args: [t0, t1] }) } catch {}
       out.details.pairs.push({ label: `${an}/${bn}`, token0: t0, token1: t1, exists: !!pool?.exists, pool })
     }
     return out

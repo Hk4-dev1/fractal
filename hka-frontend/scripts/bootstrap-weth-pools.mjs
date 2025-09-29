@@ -3,29 +3,46 @@
 // Requires: PRIVATE_KEY in env; uses RPC defaults if not set
 import dotenv from 'dotenv'
 import path from 'path'
-import { ethers } from 'ethers'
+import { createPublicClient, createWalletClient, http, parseUnits, parseAbi, formatUnits, getAddress } from 'viem'
+import { privateKeyToAccount } from 'viem/accounts'
 dotenv.config({ path: path.resolve(process.cwd(), '.env'), override: true })
 
-const ERC20_ABI = [
+const ERC20_ABI = parseAbi([
   'function balanceOf(address) view returns (uint256)',
   'function decimals() view returns (uint8)',
   'function approve(address spender, uint256 value) returns (bool)',
   'function allowance(address owner, address spender) view returns (uint256)'
-]
-const WETH_ABI = [
+])
+const WETH_ABI = parseAbi([
   'function deposit() payable',
   'function withdraw(uint256)',
   'function approve(address spender, uint256 value) returns (bool)',
   'function allowance(address owner, address spender) view returns (uint256)',
   'function balanceOf(address) view returns (uint256)',
   'function decimals() view returns (uint8)'
-]
+])
 const AMM_ABI = [
-  'function setTokenSupport(address _token, bool _supported) external',
-  'function owner() view returns (address)',
-  'function getPool(address _token0, address _token1) external view returns (tuple(address token0,address token1,uint256 reserve0,uint256 reserve1,uint256 totalSupply,uint256 lastUpdateTime,bool exists))',
-  'function createPool(address _token0, address _token1, uint256 _amount0, uint256 _amount1) external',
-  'function addLiquidity(address _token0, address _token1, uint256 _amount0, uint256 _amount1, uint256 _minLiquidity) external returns (uint256)'
+  ...parseAbi([
+    'function setTokenSupport(address _token, bool _supported)',
+    'function owner() view returns (address)',
+    'function createPool(address _token0, address _token1, uint256 _amount0, uint256 _amount1)',
+    'function addLiquidity(address _token0, address _token1, uint256 _amount0, uint256 _amount1, uint256 _minLiquidity) returns (uint256)'
+  ]),
+  {
+    type: 'function',
+    name: 'getPool',
+    stateMutability: 'view',
+    inputs: [ { name: '_token0', type: 'address' }, { name: '_token1', type: 'address' } ],
+    outputs: [ { type: 'tuple', components: [
+      { name: 'token0', type: 'address' },
+      { name: 'token1', type: 'address' },
+      { name: 'reserve0', type: 'uint256' },
+      { name: 'reserve1', type: 'uint256' },
+      { name: 'totalSupply', type: 'uint256' },
+      { name: 'lastUpdateTime', type: 'uint256' },
+      { name: 'exists', type: 'bool' }
+    ] } ]
+  }
 ]
 
 const CHAINS = {
@@ -63,64 +80,73 @@ function sortPair(a, b) { return a.toLowerCase() < b.toLowerCase() ? [a, b] : [b
 
 async function ensurePoolAndLiquidity(name, cfg) {
   console.log(`\n=== ${name.toUpperCase()} (${cfg.chainId}) ===`)
-  const provider = new ethers.JsonRpcProvider(cfg.rpc)
-  const wallet = new ethers.Wallet(PRIVATE_KEY, provider)
-  const me = await wallet.getAddress()
+  const account = privateKeyToAccount(PRIVATE_KEY)
+  const chain = { id: cfg.chainId, name, network: name, nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: [cfg.rpc] } } }
+  const publicClient = createPublicClient({ chain, transport: http(cfg.rpc) })
+  const walletClient = createWalletClient({ account, chain, transport: http(cfg.rpc) })
+  const me = account.address
   console.log('Account:', me)
 
   // Sanity: contracts exist
   for (const [label, addr] of [['AMM', cfg.amm], ['WETH', cfg.weth], ['USDC', cfg.usdc]]) {
-    const code = await provider.getCode(addr)
+    const code = await publicClient.getBytecode({ address: addr })
     if (!code || code === '0x') throw new Error(`${label} not found at ${addr}`)
   }
-
-  const amm = new ethers.Contract(cfg.amm, AMM_ABI, wallet)
-  const weth = new ethers.Contract(cfg.weth, WETH_ABI, wallet)
-  const usdc = new ethers.Contract(cfg.usdc, ERC20_ABI, wallet)
+  // helper read
+  async function read(addr, abi, fn, args=[]) { return publicClient.readContract({ address: addr, abi, functionName: fn, args }) }
 
   // Determine token0/token1 order
-  const [t0, t1] = sortPair(cfg.weth, cfg.usdc)
+  const [t0raw, t1raw] = sortPair(cfg.weth, cfg.usdc)
+  const t0 = getAddress(t0raw); const t1 = getAddress(t1raw)
 
   // Ensure token support
-  try { await (await amm.setTokenSupport(cfg.weth, true)).wait() } catch {}
-  try { await (await amm.setTokenSupport(cfg.usdc, true)).wait() } catch {}
+  try {
+    const hash = await walletClient.writeContract({ address: cfg.amm, abi: AMM_ABI, functionName: 'setTokenSupport', args: [cfg.weth, true] })
+    await publicClient.waitForTransactionReceipt({ hash })
+  } catch {}
+  try {
+    const hash = await walletClient.writeContract({ address: cfg.amm, abi: AMM_ABI, functionName: 'setTokenSupport', args: [cfg.usdc, true] })
+    await publicClient.waitForTransactionReceipt({ hash })
+  } catch {}
 
   // Amounts
-  const wethDec = await weth.decimals().catch(() => 18)
-  const usdcDec = await usdc.decimals().catch(() => 6)
-  const seedWETH = ethers.parseUnits(process.env.SEED_WETH || '0.05', wethDec)
-  const seedUSDC = ethers.parseUnits(process.env.SEED_USDC || '150', usdcDec)
+  const wethDec = await read(cfg.weth, WETH_ABI, 'decimals').catch(() => 18)
+  const usdcDec = await read(cfg.usdc, ERC20_ABI, 'decimals').catch(() => 6)
+  const seedWETH = parseUnits(process.env.SEED_WETH || '0.05', wethDec)
+  const seedUSDC = parseUnits(process.env.SEED_USDC || '150', usdcDec)
 
   // Wrap ETH if needed
-  const wethBal = await weth.balanceOf(me)
+  const wethBal = await read(cfg.weth, WETH_ABI, 'balanceOf', [me])
   if (wethBal < seedWETH) {
     const need = seedWETH - wethBal
-    console.log('Wrapping ETH to WETH:', ethers.formatUnits(need, wethDec))
-    const tx = await weth.deposit({ value: need })
-    await tx.wait()
+    console.log('Wrapping ETH to WETH:', formatUnits(need, wethDec))
+    try {
+      const hash = await walletClient.writeContract({ address: cfg.weth, abi: WETH_ABI, functionName: 'deposit', value: need })
+      await publicClient.waitForTransactionReceipt({ hash })
+    } catch (e) { console.error('deposit failed:', e?.shortMessage || e?.message || e) }
   }
 
   // Approvals
-  const allowW = await weth.allowance(me, cfg.amm).catch(() => 0n)
-  if (allowW < seedWETH) { console.log('Approving WETH...'); await (await weth.approve(cfg.amm, seedWETH)).wait() }
-  const allowU = await usdc.allowance(me, cfg.amm).catch(() => 0n)
-  if (allowU < seedUSDC) { console.log('Approving USDC...'); await (await usdc.approve(cfg.amm, seedUSDC)).wait() }
+  const allowW = await read(cfg.weth, WETH_ABI, 'allowance', [me, cfg.amm]).catch(() => 0n)
+  if (allowW < seedWETH) { console.log('Approving WETH...'); const hash = await walletClient.writeContract({ address: cfg.weth, abi: WETH_ABI, functionName: 'approve', args: [cfg.amm, seedWETH] }); await publicClient.waitForTransactionReceipt({ hash }) }
+  const allowU = await read(cfg.usdc, ERC20_ABI, 'allowance', [me, cfg.amm]).catch(() => 0n)
+  if (allowU < seedUSDC) { console.log('Approving USDC...'); const hash = await walletClient.writeContract({ address: cfg.usdc, abi: ERC20_ABI, functionName: 'approve', args: [cfg.amm, seedUSDC] }); await publicClient.waitForTransactionReceipt({ hash }) }
 
   // Create pool or add liquidity (order-aware)
   let pool
-  try { pool = await amm.getPool(t0, t1) } catch {}
+  try { pool = await publicClient.readContract({ address: cfg.amm, abi: AMM_ABI, functionName: 'getPool', args: [t0, t1] }) } catch {}
   const amt0 = t0.toLowerCase() === cfg.weth.toLowerCase() ? seedWETH : seedUSDC
   const amt1 = t1.toLowerCase() === cfg.usdc.toLowerCase() ? seedUSDC : seedWETH
   if (!pool || !pool.exists) {
     console.log('Creating pool WETH/USDC with initial amounts:', amt0.toString(), amt1.toString())
-    try { const tx = await amm.createPool(t0, t1, amt0, amt1); const rc = await tx.wait(); console.log('Pool created. tx:', rc?.hash) } 
+    try { const hash = await walletClient.writeContract({ address: cfg.amm, abi: AMM_ABI, functionName: 'createPool', args: [t0, t1, amt0, amt1] }); await publicClient.waitForTransactionReceipt({ hash }); console.log('Pool created. tx:', hash) } 
     catch (e) { console.warn('createPool failed:', e?.shortMessage || e?.message || e); throw e }
   } else {
     console.log('Pool exists; adding liquidity...')
     try {
-      const tx = await amm.addLiquidity(t0, t1, amt0, amt1, 0)
-      const rc = await tx.wait()
-      console.log('Liquidity added. tx:', rc?.hash)
+      const hash = await walletClient.writeContract({ address: cfg.amm, abi: AMM_ABI, functionName: 'addLiquidity', args: [t0, t1, amt0, amt1, 0n] })
+      await publicClient.waitForTransactionReceipt({ hash })
+      console.log('Liquidity added. tx:', hash)
     } catch (e) {
       console.error('addLiquidity failed:', e?.shortMessage || e?.message || e)
       throw e

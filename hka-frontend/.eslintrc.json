@@ -26,8 +26,18 @@
     "react-hooks/exhaustive-deps": "warn",
     "@typescript-eslint/no-unused-vars": ["warn", { "argsIgnorePattern": "^_" }],
     "@typescript-eslint/no-explicit-any": "warn",
-    "react/react-in-jsx-scope": "off"
+    "react/react-in-jsx-scope": "off",
+    // TypeScript already checks undefined names; this rule causes false-positives for types like JSX/ImportMetaEnv
+    "no-undef": "off",
+    // Defer unused var checks to the TS-aware rule above
+    "no-unused-vars": "off"
   },
+  "overrides": [
+    {
+      "files": ["**/*.test.ts", "**/*.test.tsx", "scripts/**/*.{js,mjs,ts}", "vitest.config.*"],
+      "env": { "node": true }
+    }
+  ],
   "settings": {
     "react": {
       "version": "detect"

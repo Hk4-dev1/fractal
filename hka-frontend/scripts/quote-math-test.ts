@@ -1,5 +1,5 @@
 #!/usr/bin/env ts-node
-import { parseUnits, formatUnits } from 'ethers'
+import { parseUnits, formatUnits } from 'viem'
 
 interface Case { ethReserve: string; usdcReserve: string; amountInEth: string; feeBps: number }
 

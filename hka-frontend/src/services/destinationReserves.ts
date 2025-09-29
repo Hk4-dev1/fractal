@@ -1,6 +1,7 @@
-import { Contract } from 'ethers'
 import CONTRACTS from '../../services/contracts'
-import { getCachedProvider, withRetries } from './providerCache'
+import type { ContractsEntry } from '../../types/contracts'
+import { withRetries, getViemClient } from './providerCache'
+import { parseAbi } from 'viem'
 
 const AMM_ABI = [
   'function getReserves() view returns (uint256 ethReserve, uint256 usdcReserve)',
@@ -22,19 +23,25 @@ export async function getDestinationReserves(chainId: number): Promise<Destinati
   const hit = CACHE.get(key)
   const now = Date.now()
   if (hit && now - hit.fetchedAt < TTL_MS) return hit
-  const contracts = (CONTRACTS as Record<number, { ammEngine: string }>)[chainId]
+  const contracts = (CONTRACTS as Record<number, Pick<ContractsEntry,'ammEngine'>>)[chainId]
   if (!contracts) throw new Error(`Unsupported dest chain ${chainId}`)
-  const provider = getCachedProvider(chainId)
-  const amm = new Contract(contracts.ammEngine, AMM_ABI, provider)
-  const [res, feeBps] = await Promise.all([
-    withRetries(() => amm.getReserves()),
-    amm.feeBps().catch(() => 30n)
-  ])
-  const ethReserve: bigint = res.ethReserve || res[0]
-  const usdcReserve: bigint = res.usdcReserve || res[1]
-  const out: DestinationReserves = { ethReserve, usdcReserve, feeBps: BigInt(feeBps), fetchedAt: now }
-  CACHE.set(key, out)
-  return out
+  // Try viem path first
+  try {
+    const client = getViemClient(chainId)
+    const abi = parseAbi(AMM_ABI)
+    const [res, feeBpsRaw] = await Promise.all([
+      withRetries(() => client.readContract({ address: contracts.ammEngine as `0x${string}`, abi, functionName: 'getReserves' }) as Promise<{ ethReserve: bigint; usdcReserve: bigint } | readonly [bigint, bigint]>),
+      client.readContract({ address: contracts.ammEngine as `0x${string}`, abi, functionName: 'feeBps' }).catch(() => 30n) as Promise<bigint | number>
+    ])
+    const hasStruct = (x: unknown): x is { ethReserve: bigint; usdcReserve: bigint } =>
+      typeof x === 'object' && x !== null && 'ethReserve' in x && 'usdcReserve' in x
+    const ethReserve: bigint = Array.isArray(res) ? res[0] : (hasStruct(res) ? res.ethReserve : 0n)
+    const usdcReserve: bigint = Array.isArray(res) ? res[1] : (hasStruct(res) ? res.usdcReserve : 0n)
+    const feeBps = BigInt(feeBpsRaw)
+    const out: DestinationReserves = { ethReserve, usdcReserve, feeBps, fetchedAt: now }
+    CACHE.set(key, out)
+    return out
+  } catch { throw new Error('reserves read failed') }
 }
 
 export function clearDestinationReserves(chainId?: number) {

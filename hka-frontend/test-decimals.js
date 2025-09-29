@@ -1,5 +1,5 @@
 // Test decimal parsing issues
-import { ethers } from 'ethers';
+import { parseUnits } from 'viem';
 
 function testDecimals() {
   console.log('Testing decimal parsing...');
@@ -15,7 +15,7 @@ function testDecimals() {
   
   testCases.forEach(({ value, decimals }) => {
     try {
-      const result = ethers.parseUnits(value, decimals);
+  const result = parseUnits(value, decimals);
       console.log(`✅ ${value} (${decimals} decimals) = ${result.toString()}`);
     } catch (error) {
       console.log(`❌ ${value} (${decimals} decimals) = ${error.message}`);

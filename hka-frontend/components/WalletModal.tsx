@@ -27,8 +27,17 @@ export const WalletModal: React.FC<WalletModalProps> = ({ isOpen, onClose }) => 
     getFormattedBalance
   } = useWallet();
 
+  // Lightweight provider detection for user feedback
+  type InjectedProvider = { isMetaMask?: boolean; providers?: InjectedProvider[] }
+  const injected: InjectedProvider | undefined = typeof window !== 'undefined' ? (window as unknown as { ethereum?: InjectedProvider }).ethereum : undefined;
+  const providers: InjectedProvider[] | undefined = injected?.providers;
+  const metaMaskDetected = providers ? providers.some((p) => !!p?.isMetaMask) : !!injected?.isMetaMask;
+
   const handleConnect = async () => {
     try {
+  try { window.dispatchEvent(new Event('hka:wallet-intent')); } catch {
+        /* non-blocking: dispatch hint may fail in some browsers */
+      }
       await connect();
       onClose();
     } catch (error) {
@@ -103,6 +112,12 @@ export const WalletModal: React.FC<WalletModalProps> = ({ isOpen, onClose }) => 
                     </>
                   )}
                 </Button>
+
+                <div className="text-[11px] text-muted-foreground mt-2">
+                  {injected
+                    ? (metaMaskDetected ? 'MetaMask detected' : 'Injected wallet detected')
+                    : 'No injected wallet detected'}
+                </div>
               </div>
 
               <div className="text-xs text-muted-foreground text-center space-y-2">

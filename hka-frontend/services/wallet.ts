@@ -1,17 +1,11 @@
-// Enhanced Wallet Service with MetaMask SDK Best Practices
+// Enhanced Wallet Service (migrated off ethers -> minimal EIP-1193 + viem helpers)
 import { MetaMaskSDK } from '@metamask/sdk';
-import { ethers, BrowserProvider, Signer } from 'ethers';
+import { formatUnits } from './viemAdapter'
 // Debug utilities
 const DEBUG_DEX = typeof import.meta !== 'undefined' && import.meta.env?.VITE_DEBUG_DEX === 'true';
 const dlog = (...args: unknown[]) => { if (DEBUG_DEX) console.log(...args); };
 import { CONTRACTS } from './contracts';
-
-// Define process for browser environment
-declare const process: {
-  env: {
-    NODE_ENV: string;
-  };
-};
+import type { Eip1193Provider } from '../types/eip1193'
 
 // Types
 export interface WalletState {
@@ -20,9 +14,9 @@ export interface WalletState {
   isSwitchingNetwork: boolean;
   account: string | null;
   chainId: number | null;
-  balance: string;
-  provider: BrowserProvider | null;
-  signer: Signer | null;
+  balance: string; // ETH balance (formatted)
+  provider: ProviderShim | null; // minimal shim (was BrowserProvider)
+  signer: SignerShim | null;     // minimal shim (was Signer)
 }
 
 export interface NetworkInfo {
@@ -73,6 +67,28 @@ export const SUPPORTED_NETWORKS: { [key: number]: NetworkInfo } = {
 export type WalletEventType = 'connect' | 'disconnect' | 'accountChanged' | 'chainChanged' | 'error' | 'status';
 export type WalletEventCallback = (data?: unknown) => void;
 
+// Minimal EIP-1193 typings (augmented with MetaMask hints)
+// using shared EIP-1193 type
+
+class ProviderShim {
+  constructor(public ethereum: Eip1193Provider) {}
+  async getBalance(address: string): Promise<bigint> {
+    const hex = await this.ethereum.request({ method: 'eth_getBalance', params: [address, 'latest'] }) as string
+    return BigInt(hex)
+  }
+  async getNetwork(): Promise<{ chainId: bigint }> {
+    const hex = await this.ethereum.request({ method: 'eth_chainId' }) as string
+    return { chainId: BigInt(hex) }
+  }
+}
+
+class SignerShim {
+  constructor(private account: string, private provider: ProviderShim) {}
+  async getAddress(): Promise<string> { return this.account }
+  // For parity with legacy code expecting provider.getSigner().getAddress()
+  getProvider(): ProviderShim { return this.provider }
+}
+
 class EnhancedWalletService {
   private sdk: MetaMaskSDK | null = null;
   private state: WalletState = {
@@ -82,65 +98,119 @@ class EnhancedWalletService {
     account: null,
     chainId: null,
     balance: '0',
-    provider: null,
-    signer: null
+  provider: null,
+  signer: null
   };
   
   private eventListeners: Map<WalletEventType, Set<WalletEventCallback>> = new Map();
   private isInitialized = false;
+  private isInitializing = false;
+  private listenerBoundProviders: WeakSet<Eip1193Provider> = new WeakSet();
 
   constructor() {
     this.initializeEventListeners();
   }
 
-  // Initialize MetaMask SDK with proper configuration
+  // Initialize MetaMask (prefer injected provider; only create SDK if needed)
   async initialize(): Promise<void> {
-    if (this.isInitialized) return;
+    if (this.isInitialized || this.isInitializing) return;
+
+    this.isInitializing = true;
 
     try {
-  dlog('🔧 Initializing MetaMask SDK...');
-      
-      this.sdk = new MetaMaskSDK({
-        dappMetadata: {
-          name: 'HKA DEX',
-          url: typeof window !== 'undefined' ? window.location.origin : 'https://hka-dex.com',
-          iconUrl: typeof window !== 'undefined' ? `${window.location.origin}/favicon.ico` : undefined,
-        },
-        logging: {
-          developerMode: process.env.NODE_ENV === 'development',
-        },
-        storage: {
-          enabled: true,
-        },
-        checkInstallationImmediately: false,
-        extensionOnly: false, // Support both extension and mobile
-      });
+      dlog('🔧 Initializing MetaMask SDK...');
+  const hasInjected = typeof window !== 'undefined' && !!(window as unknown as { ethereum?: unknown }).ethereum;
+      if (!hasInjected) {
+        this.sdk = this.buildSdk(false);
+      }
 
-      // Setup event listeners
-      this.setupSDKEventListeners();
-      
+      // Setup event listeners on whichever provider is available
+      const injectedSoon = await this.waitForInjectedEthereum(2000);
+      const winEth: Eip1193Provider | undefined = injectedSoon;
+      const sdkProvider = this.sdk?.getProvider() as unknown as Eip1193Provider | undefined;
+      const active = this.chooseInjectedProvider(winEth) || sdkProvider;
+      if (active) {
+        this.setupProviderEventListeners(active);
+      }
+
+      // Mark initialized BEFORE attempting restore to avoid re-entrant initialize() via connect()
+      this.isInitialized = true;
+
       // Try to restore previous connection
       await this.restoreConnection();
-      
-      this.isInitialized = true;
-  dlog('✅ MetaMask SDK initialized successfully');
-      
+
+      dlog('✅ MetaMask SDK initialized successfully');
+
     } catch (error) {
-      console.error('❌ Failed to initialize MetaMask SDK:', error);
+      console.error('❌ Failed to initialize wallet service:', error);
       this.emit('error', { message: 'Failed to initialize wallet service', error });
+      this.isInitialized = false;
+    } finally {
+      this.isInitializing = false;
     }
   }
 
-  // Setup SDK event listeners
-  private setupSDKEventListeners(): void {
-    if (!this.sdk) return;
+  private buildSdk(extensionOnly: boolean): MetaMaskSDK {
+    return new MetaMaskSDK({
+      dappMetadata: {
+        name: 'HKA DEX',
+        url: typeof window !== 'undefined' ? window.location.origin : 'https://hka-dex.com',
+        iconUrl: typeof window !== 'undefined' ? `${window.location.origin}/favicon.ico` : undefined,
+      },
+      logging: {
+        developerMode: (typeof import.meta !== 'undefined' && import.meta.env?.MODE) === 'development',
+      },
+      storage: { enabled: true },
+      checkInstallationImmediately: false,
+      extensionOnly,
+    });
+  }
 
-    const provider = this.sdk.getProvider();
-    if (!provider) return;
+  private getActiveProvider(): Eip1193Provider | undefined {
+  const winEth = typeof window !== 'undefined' ? (window as unknown as { ethereum?: Eip1193Provider }).ethereum : undefined;
+    const injected = this.chooseInjectedProvider(winEth);
+    return injected || (this.sdk?.getProvider() as unknown as Eip1193Provider | undefined);
+  }
 
+  // Prefer MetaMask if multiple providers are injected
+  private chooseInjectedProvider(injected?: Eip1193Provider): Eip1193Provider | undefined {
+    if (!injected) return undefined;
+    if (Array.isArray(injected.providers) && injected.providers.length) {
+  const mm = injected.providers.find((p) => p.isMetaMask === true);
+      return (mm as Eip1193Provider | undefined) || injected.providers[0];
+    }
+    return injected;
+  }
+
+  // Wait for MetaMask to inject window.ethereum (per MetaMask docs)
+  private waitForInjectedEthereum(timeoutMs = 3000): Promise<Eip1193Provider | undefined> {
+    return new Promise((resolve) => {
+  const existing = typeof window !== 'undefined' ? (window as unknown as { ethereum?: Eip1193Provider }).ethereum : undefined;
+      if (existing) return resolve(existing);
+      let done = false;
+      const onReady = () => {
+        if (done) return;
+        done = true;
+        resolve((window as unknown as { ethereum?: Eip1193Provider }).ethereum);
+      };
+      window.addEventListener('ethereum#initialized' as unknown as string, onReady as EventListener, { once: true } as AddEventListenerOptions);
+      setTimeout(() => {
+        if (done) return;
+        done = true;
+        resolve((window as unknown as { ethereum?: Eip1193Provider }).ethereum);
+      }, timeoutMs);
+    });
+  }
+
+  // Setup provider event listeners (works for window.ethereum or SDK provider)
+  private setupProviderEventListeners(provider: Eip1193Provider): void {
+    // Avoid duplicate bindings on the same provider instance
+    if (this.listenerBoundProviders.has(provider)) {
+      dlog('ℹ️ Provider listeners already bound, skipping');
+      return;
+    }
     // Account changes
-    provider.on('accountsChanged', (...args: unknown[]) => {
-      const accounts = args[0] as string[];
+  provider.on?.('accountsChanged', (accounts: string[]) => {
   dlog('📱 Accounts changed:', accounts);
       if (accounts.length === 0) {
         this.handleDisconnect();
@@ -150,24 +220,24 @@ class EnhancedWalletService {
     });
 
     // Chain changes
-    provider.on('chainChanged', (...args: unknown[]) => {
-      const chainId = args[0] as string;
+  provider.on?.('chainChanged', (chainId: string) => {
   dlog('🔗 Chain changed:', chainId);
       this.handleChainChange(parseInt(chainId, 16));
     });
 
     // Connection
-    provider.on('connect', (...args: unknown[]) => {
-      const connectInfo = args[0] as { chainId: string };
+  provider.on?.('connect', (connectInfo: { chainId: string }) => {
   dlog('🔌 Connected:', connectInfo);
       this.handleConnect(parseInt(connectInfo.chainId, 16));
     });
 
     // Disconnection
-    provider.on('disconnect', (error: unknown) => {
+  provider.on?.('disconnect', (error: unknown) => {
   dlog('🔌 Disconnected:', error);
       this.handleDisconnect();
     });
+  // Mark provider as bound to prevent duplicate listeners
+  this.listenerBoundProviders.add(provider);
   }
 
   // Connect to MetaMask
@@ -176,33 +246,58 @@ class EnhancedWalletService {
       await this.initialize();
     }
 
-    if (!this.sdk) {
-      throw new Error('MetaMask SDK not initialized');
-    }
+  // Prefer the injected extension provider when available (desktop)
+  // Give the injector a brief chance if it was late
+  let provider = this.getActiveProvider() || await this.waitForInjectedEthereum(1200) || this.getActiveProvider();
 
     try {
       this.setState({ isConnecting: true });
+      this.emit('status', this.state);
   dlog('🔄 Connecting to MetaMask...');
 
-      const provider = this.sdk.getProvider();
+      // If no active provider, try SDK connect (mobile deep-link / QR)
       if (!provider) {
-        throw new Error('MetaMask provider not available');
+        if (!this.sdk) throw new Error('MetaMask SDK not initialized');
+        dlog('🪪 No injected provider. Attempting SDK connect…');
+        try {
+          // This triggers MetaMask Mobile/Deeplink flow where supported
+          await this.sdk.connect();
+          provider = this.getActiveProvider();
+  } catch {
+          throw new Error('MetaMask not available. Install the extension or open in MetaMask Mobile.');
+        }
       }
 
-      // Request account access
-      const accounts = await provider.request({
-        method: 'eth_requestAccounts',
-      }) as string[];
+      if (!provider) throw new Error('MetaMask provider not available');
+
+      // Debug provider shape
+      dlog('🔍 Provider details:', {
+        hasRequest: typeof provider.request === 'function',
+        isMetaMask: (provider as Eip1193Provider).isMetaMask === true,
+        hasProvidersArray: Array.isArray((provider as Eip1193Provider).providers),
+      });
+
+      // Preflight check: see if already authorized
+      let accounts = await provider.request({ method: 'eth_accounts' }) as string[];
+      if (!accounts || accounts.length === 0) {
+        // Request account access with a timeout to surface UX hints
+        const req = provider.request({ method: 'eth_requestAccounts' }) as Promise<unknown>;
+        const accountsResp = await Promise.race([
+          req.then((v) => v as string[]),
+          new Promise<string[]>((_, rej) => setTimeout(() => rej(new Error('MetaMask prompt timed out. Click the extension icon to continue.')), 15000)),
+        ]);
+        accounts = accountsResp;
+      }
 
       if (!accounts || accounts.length === 0) {
         throw new Error('No accounts returned from MetaMask');
       }
 
-      // Create ethers provider
-      const ethersProvider = new BrowserProvider(provider);
-      const network = await ethersProvider.getNetwork();
-      const signer = await ethersProvider.getSigner();
-      const balance = await ethersProvider.getBalance(accounts[0]);
+  // Create provider/signature shims
+  const ethProvider = new ProviderShim(provider as unknown as Eip1193Provider)
+  const network = await ethProvider.getNetwork();
+  const signer = new SignerShim(accounts[0], ethProvider)
+  const balance = await ethProvider.getBalance(accounts[0])
 
       // Update state
       this.setState({
@@ -210,31 +305,39 @@ class EnhancedWalletService {
         isConnecting: false,
   isSwitchingNetwork: false,
         account: accounts[0],
-        chainId: Number(network.chainId),
-        balance: ethers.formatEther(balance),
-        provider: ethersProvider,
-        signer
+  chainId: Number(network.chainId),
+  balance: formatUnits(balance, 18),
+  provider: ethProvider,
+  signer
       });
 
       // Store connection state
       localStorage.setItem('wallet_connected', 'true');
       localStorage.setItem('wallet_account', accounts[0]);
+  // Hint the app to mount wallet layer earlier next time
+  try { localStorage.setItem('hka_last_wallet_connect', '1'); } catch {
+    /* ignore: storage may be unavailable (private mode) */
+  }
+
+  // Ensure listeners are attached to the now-active provider
+  this.setupProviderEventListeners(provider as unknown as Eip1193Provider);
 
   dlog('✅ Connected to MetaMask:', {
-        account: accounts[0],
-        chainId: Number(network.chainId),
-        balance: ethers.formatEther(balance)
+  account: accounts[0],
+  chainId: Number(network.chainId),
+  balance: formatUnits(balance, 18)
       });
 
-      this.emit('connect', this.state);
+  this.emit('connect', this.state);
       return this.state;
 
     } catch (error: unknown) {
-      console.error('❌ Connection failed:', error);
+  console.error('❌ Connection failed:', error);
       this.setState({ 
         isConnecting: false,
         isConnected: false 
       });
+  this.emit('status', this.state);
       
       // Handle specific MetaMask errors
       const err = error as { code?: number; message?: string };
@@ -280,14 +383,8 @@ class EnhancedWalletService {
 
   // Switch to specific network
   async switchNetwork(chainId: number): Promise<void> {
-    if (!this.sdk) {
-      throw new Error('MetaMask not connected');
-    }
-
-    const provider = this.sdk.getProvider();
-    if (!provider) {
-      throw new Error('MetaMask provider not available');
-    }
+  const provider = this.getActiveProvider();
+    if (!provider) throw new Error('MetaMask provider not available');
 
     const network = SUPPORTED_NETWORKS[chainId];
     if (!network) {
@@ -300,7 +397,7 @@ class EnhancedWalletService {
   this.emit('status', this.state);
 
       // Try to switch to the network
-      await provider.request({
+  await provider.request({
         method: 'wallet_switchEthereumChain',
         params: [{ chainId: `0x${chainId.toString(16)}` }],
       });
@@ -314,7 +411,7 @@ class EnhancedWalletService {
       const err = error as { code?: number; message?: string };
       if (err.code === 4902) {
         await this.addNetwork(network);
-        await provider.request({
+  await provider.request({
           method: 'wallet_switchEthereumChain',
           params: [{ chainId: `0x${chainId.toString(16)}` }],
         });
@@ -332,15 +429,13 @@ class EnhancedWalletService {
 
   // Add network to MetaMask
   private async addNetwork(network: NetworkInfo): Promise<void> {
-    if (!this.sdk) return;
-
-    const provider = this.sdk.getProvider();
+  const provider = this.getActiveProvider();
     if (!provider) return;
 
     try {
   dlog(`🔄 Adding ${network.name} to MetaMask...`);
 
-      await provider.request({
+  await provider.request({
         method: 'wallet_addEthereumChain',
         params: [{
           chainId: `0x${network.chainId.toString(16)}`,
@@ -361,14 +456,15 @@ class EnhancedWalletService {
 
   // Restore connection from localStorage
   private async restoreConnection(): Promise<void> {
+  // Skip restore if already connected or connecting
+  if (this.state.isConnected || this.state.isConnecting) return;
     const wasConnected = localStorage.getItem('wallet_connected') === 'true';
     const savedAccount = localStorage.getItem('wallet_account');
 
-    if (wasConnected && savedAccount && this.sdk) {
+  if (wasConnected && savedAccount) {
       try {
   dlog('🔄 Restoring previous connection...');
-        const provider = this.sdk.getProvider();
-        
+    const provider = this.getActiveProvider();
         if (provider) {
           const accounts = await provider.request({
             method: 'eth_accounts',
@@ -415,10 +511,10 @@ class EnhancedWalletService {
       const balance = await this.state.provider.getBalance(account);
       this.setState({
         account,
-        balance: ethers.formatEther(balance)
+        balance: formatUnits(balance, 18)
       });
       localStorage.setItem('wallet_account', account);
-      this.emit('accountChanged', { account, balance: ethers.formatEther(balance) });
+      this.emit('accountChanged', { account, balance: formatUnits(balance, 18) });
     }
   }
 
@@ -437,8 +533,8 @@ class EnhancedWalletService {
             throw new Error('SDK provider not available');
           }
           
-          const provider = new ethers.BrowserProvider(sdkProvider);
-          const signer = await provider.getSigner();
+          const provider = new ProviderShim(sdkProvider as unknown as Eip1193Provider)
+          const signer = new SignerShim(this.state.account, provider)
           
           this.setState({ 
             provider, 
@@ -450,7 +546,7 @@ class EnhancedWalletService {
           
           // Update balance for new chain
           const balance = await provider.getBalance(this.state.account);
-          this.setState({ balance: ethers.formatEther(balance) });
+          this.setState({ balance: formatUnits(balance, 18) });
           
         } catch (error) {
           console.error('❌ Error refreshing provider/signer:', error);
@@ -463,33 +559,29 @@ class EnhancedWalletService {
 
   // Wait until the provider actually reports the requested chain, then refresh signer/balance
   async waitForChainReady(targetChainId: number, timeoutMs: number = 15000): Promise<void> {
-    if (!this.sdk) throw new Error('MetaMask not connected');
-    const sdkProvider = this.sdk.getProvider();
-    if (!sdkProvider) throw new Error('SDK provider not available');
+  const activeProvider = this.getActiveProvider();
+    if (!activeProvider) throw new Error('MetaMask provider not available');
 
     const start = Date.now();
     let lastError: unknown = null;
     while (Date.now() - start < timeoutMs) {
       try {
-        const provider = new ethers.BrowserProvider(sdkProvider);
+        const provider = new ProviderShim(activeProvider as unknown as Eip1193Provider)
         const network = await provider.getNetwork();
         if (Number(network.chainId) === targetChainId) {
-          // Refresh state provider/signer/balance
-          const signer = await provider.getSigner();
+          const signer = new SignerShim(this.state.account || '', provider)
           let balanceStr = this.state.balance;
           if (this.state.account) {
             const bal = await provider.getBalance(this.state.account);
-            balanceStr = ethers.formatEther(bal);
+            balanceStr = formatUnits(bal, 18);
           }
           this.setState({ provider, signer, chainId: targetChainId, balance: balanceStr });
-          // Also emit chainChanged to notify listeners
-          this.emit('chainChanged', { chainId: targetChainId });
           // Small settle delay
           await new Promise(r => setTimeout(r, 120));
           return;
         }
-      } catch (e) {
-        lastError = e;
+      } catch (err) {
+        lastError = err;
       }
       await new Promise(r => setTimeout(r, 250));
     }
@@ -541,13 +633,8 @@ class EnhancedWalletService {
     return this.state.chainId;
   }
 
-  getProvider(): BrowserProvider | null {
-    return this.state.provider;
-  }
-
-  getSigner(): Signer | null {
-    return this.state.signer;
-  }
+  getProvider(): ProviderShim | null { return this.state.provider }
+  getSigner(): SignerShim | null { return this.state.signer }
 
   // Contract helpers
   getContractAddresses(chainId?: number): typeof CONTRACTS[keyof typeof CONTRACTS] | null {

@@ -1,6 +1,8 @@
-import { Contract, ethers } from 'ethers'
+import { getViemClient } from './providerCache'
+import { parseAbi } from 'viem'
+import { formatUnits } from '../../services/viemAdapter'
 import CONTRACTS from '../../services/contracts'
-import { getCachedProvider, withRetries } from './providerCache'
+import { withRetries } from './providerCache'
 
 const ERC20_ABI = [
   'function balanceOf(address account) view returns (uint256)',
@@ -29,15 +31,25 @@ export async function getTokenFormattedBalance(params: {
   symbol: string
 }): Promise<string> {
   const { chainId, account, symbol } = params
-  const provider = getCachedProvider(chainId)
-
+  // provider cache touched implicitly by getViemClient; no ethers provider
   const addr = getTokenAddressForSymbol(chainId, symbol)
   if (addr === '0x0000000000000000000000000000000000000000') {
-    const bal = await withRetries(() => provider.getBalance(account))
-    return ethers.formatEther(bal)
+    const client = getViemClient(chainId)
+    const bal = await withRetries(() => client.getBalance({ address: account as `0x${string}` }))
+    return formatUnits(bal, 18)
   }
 
-  const token = new Contract(addr, ERC20_ABI, provider)
-  const [bal, dec] = await withRetries(() => Promise.all([token.balanceOf(account), token.decimals()]))
-  return ethers.formatUnits(bal, dec)
+  // viem path first (tree-shakable)
+  try {
+    const client = getViemClient(chainId)
+    const abi = parseAbi(ERC20_ABI)
+    const [bal, dec] = await withRetries(() => Promise.all([
+      client.readContract({ address: addr as `0x${string}`, abi, functionName: 'balanceOf', args: [account as `0x${string}`] }) as Promise<bigint>,
+      client.readContract({ address: addr as `0x${string}`, abi, functionName: 'decimals' }) as Promise<number | bigint>,
+    ]))
+    const decimals = typeof dec === 'bigint' ? Number(dec) : dec
+    return formatUnits(bal, decimals)
+  } catch {
+    throw new Error('balance read failed (viem)')
+  }
 }

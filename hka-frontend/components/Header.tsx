@@ -62,7 +62,12 @@ export function Header({ darkMode, toggleDarkMode, onMenuClick }: HeaderProps) {
         <div className="flex items-center gap-2 md:gap-4">
           {/* Connect Wallet */}
           <Button 
-            onClick={() => setShowWalletModal(true)}
+            onClick={() => {
+              try { window.dispatchEvent(new Event('hka:wallet-intent')); } catch {
+                /* non-blocking: dispatch hint may fail in some browsers */
+              }
+              setShowWalletModal(true)
+            }}
             className={`transition-all duration-200 shadow-lg hover:shadow-xl ${
               darkMode 
                 ? 'bg-black hover:bg-gray-900 text-white' 

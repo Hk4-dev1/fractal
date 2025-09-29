@@ -1,15 +1,17 @@
 #!/usr/bin/env node
+// Migrated from ethers -> viem
 import dotenv from 'dotenv'
 import path from 'path'
-import { ethers } from 'ethers'
+import { createPublicClient, createWalletClient, http } from 'viem'
+import { privateKeyToAccount } from 'viem/accounts'
 dotenv.config({ path: path.resolve(process.cwd(), '.env'), override: true })
 
 const AMM_ABI = [
-  'function owner() view returns (address)',
-  'function FEE_DENOMINATOR() view returns (uint256)',
-  'function swapFee() view returns (uint256)',
-  'function protocolFee() view returns (uint256)',
-  'function updateFees(uint256 _swapFee, uint256 _protocolFee)'
+  { type: 'function', name: 'owner', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
+  { type: 'function', name: 'FEE_DENOMINATOR', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'swapFee', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'protocolFee', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'updateFees', stateMutability: 'nonpayable', inputs: [ { type: 'uint256', name: '_swapFee' }, { type: 'uint256', name: '_protocolFee' } ], outputs: [] }
 ]
 
 const CHAINS = {
@@ -33,8 +35,8 @@ function pctToUnits(denom, pctStr) {
 async function main() {
   const rawPk = (process.env.PRIVATE_KEY || '').trim()
   const PRIVATE_KEY = rawPk ? (rawPk.startsWith('0x') ? rawPk : `0x${rawPk}`) : ''
-  if (!PRIVATE_KEY || PRIVATE_KEY.length < 66) {
-    console.error('Set PRIVATE_KEY in env (0x-prefixed or raw 64-hex)')
+  if (!PRIVATE_KEY || PRIVATE_KEY.length !== 66) {
+    console.error('Set PRIVATE_KEY in env (0x-prefixed 64 hex)')
     process.exit(1)
   }
 
@@ -44,23 +46,22 @@ async function main() {
 
   for (const [name, cfg] of Object.entries(CHAINS)) {
     console.log(`\n=== ${name.toUpperCase()} (${cfg.chainId}) ===`)
-    const provider = new ethers.JsonRpcProvider(cfg.rpc)
-    const wallet = new ethers.Wallet(PRIVATE_KEY, provider)
-    const me = await wallet.getAddress()
-    const amm = new ethers.Contract(cfg.amm, AMM_ABI, wallet)
+  const chainObj = { id: cfg.chainId, name: name, nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: [cfg.rpc] }, public: { http: [cfg.rpc] } } }
+  const account = privateKeyToAccount(PRIVATE_KEY)
+  const publicClient = createPublicClient({ chain: chainObj, transport: http(cfg.rpc) })
+  const walletClient = createWalletClient({ account, chain: chainObj, transport: http(cfg.rpc) })
+  const me = account.address
 
-    const owner = await amm.owner().catch(() => '0x')
+  const owner = await publicClient.readContract({ address: cfg.amm, abi: AMM_ABI, functionName: 'owner' }).catch(() => '0x')
     if (owner.toLowerCase() !== me.toLowerCase()) {
       console.log(`Skip: caller not owner. Owner=${owner}`)
       continue
     }
-
-    const denom = await amm.FEE_DENOMINATOR().catch(() => 100000n)
-    const wantSwap = pctToUnits(denom, swapPct)
-    const wantProto = pctToUnits(denom, protoPct)
-
-    const curSwap = await amm.swapFee().catch(() => 0n)
-    const curProto = await amm.protocolFee().catch(() => 0n)
+  const denom = await publicClient.readContract({ address: cfg.amm, abi: AMM_ABI, functionName: 'FEE_DENOMINATOR' }).catch(() => 100000n)
+  const wantSwap = pctToUnits(denom, swapPct)
+  const wantProto = pctToUnits(denom, protoPct)
+  const curSwap = await publicClient.readContract({ address: cfg.amm, abi: AMM_ABI, functionName: 'swapFee' }).catch(() => 0n)
+  const curProto = await publicClient.readContract({ address: cfg.amm, abi: AMM_ABI, functionName: 'protocolFee' }).catch(() => 0n)
     console.log('Current:', { swap: curSwap.toString(), proto: curProto.toString(), denom: denom.toString() })
     console.log('Target :', { swap: wantSwap.toString(), proto: wantProto.toString() })
 
@@ -69,9 +70,9 @@ async function main() {
       continue
     }
 
-    const tx = await amm.updateFees(wantSwap, wantProto)
-    const rc = await tx.wait()
-    console.log('Fees updated. tx:', rc?.hash)
+  const hash = await walletClient.writeContract({ address: cfg.amm, abi: AMM_ABI, functionName: 'updateFees', args: [wantSwap, wantProto] })
+  const receipt = await publicClient.waitForTransactionReceipt({ hash })
+  console.log('Fees updated. tx:', receipt.transactionHash)
   }
 }
 

@@ -1,4 +1,4 @@
-import { ethers } from 'ethers'
+import { parseUnits, formatUnits } from '../../services/viemAdapter'
 import { quoteRoute } from './crosschainRouter'
 import CONTRACTS from '../../services/contracts'
 import { getTokenDecimals } from './tokenDecimals'
@@ -53,7 +53,7 @@ export async function getCrossChainSwapQuote(params: CrossChainSwapQuoteParams):
   const srcDecimals = await getTokenDecimals(srcChainId, srcAddr)
   const dstDecimals = await getTokenDecimals(dstChainId, dstAddr)
 
-  let amountInWei = ethers.parseUnits(amountIn || '0', srcDecimals)
+  let amountInWei = parseUnits(amountIn || '0', srcDecimals)
   if (subtractFeeBps > 0) amountInWei = (amountInWei * BigInt(10_000 - subtractFeeBps)) / 10_000n
 
   // Fee route (LayerZero) - using existing router logic (works on from chain only for now)
@@ -108,15 +108,15 @@ export async function getCrossChainSwapQuote(params: CrossChainSwapQuoteParams):
   }
 
   if (amountOutWei < 0n) amountOutWei = 0n
-  const amountOutEst = ethers.formatUnits(amountOutWei, dstDecimals)
+  const amountOutEst = formatUnits(amountOutWei, dstDecimals)
 
   return {
     route: feeQuote.route,
     amountIn,
     amountOutEst,
     priceImpactPercent,
-    nativeFeeEth: (Number(ethers.formatEther(feeQuote.nativeFee)).toFixed(6)),
-    lzTokenFeeEth: (Number(ethers.formatEther(feeQuote.lzTokenFee)).toFixed(6)),
+  nativeFeeEth: (Number(formatUnits(BigInt(feeQuote.nativeFee), 18)).toFixed(6)),
+  lzTokenFeeEth: (Number(formatUnits(BigInt(feeQuote.lzTokenFee), 18)).toFixed(6)),
     legs: feeQuote.legs
   }
 }

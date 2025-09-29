@@ -36,7 +36,7 @@ export function buildSwapPayload(params: {
 }
 
 export function encodePayload(payload: AnyCrosschainPayload): string {
-  // For now, return JSON string; caller can convert to bytes via ethers.toUtf8Bytes when sending.
+  // For now, return JSON string; caller can convert to bytes via viem stringToHex when sending.
   return JSON.stringify(payload);
 }
 

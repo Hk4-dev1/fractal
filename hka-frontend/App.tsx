@@ -18,6 +18,8 @@ const NotificationCenter = lazy(() => import('./components/NotificationCenter').
 const Health = lazy(() => import('./components/Health').then(m => ({ default: m.Health })));
 import { useIsMobile } from './components/ui/use-mobile';
 const ToasterLazy = lazy(() => import('sonner').then(m => ({ default: m.Toaster })));
+import RpcHealthPanel from './components/RpcHealthPanel';
+import DevConfigBanner from './components/DevConfigBanner';
 
 function App() {
   const [darkMode, setDarkMode] = useState(false);
@@ -117,6 +119,12 @@ function App() {
 
             {/* Layout Container */}
             <div className="flex pt-16 md:pt-20">
+              {/* Dev-only config banner */}
+              {import.meta.env?.MODE === 'development' && (
+                <div className="fixed top-16 left-0 right-0 z-40">
+                  <DevConfigBanner />
+                </div>
+              )}
               {/* Desktop Sidebar */}
               {!isMobile && (
                 <Suspense fallback={<SidebarSkeleton /> }>
@@ -191,6 +199,9 @@ function App() {
                 richColors
               />
             </Suspense>
+
+            {/* Hidden Dev Panel: Toggle with Ctrl/⌘ + H */}
+            <RpcHealthPanel />
           </div>
         </div>
       </DEXProvider>

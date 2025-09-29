@@ -1,14 +1,14 @@
-import { ethers } from 'ethers'
+import { parseUnits, formatUnits } from '../../services/viemAdapter'
 
 export function parseAmount(amount: string, decimals: number): bigint {
   if (!amount || amount.trim() === '') return 0n
-  return ethers.parseUnits(normalize(amount, decimals), decimals)
+  return parseUnits(normalize(amount, decimals), decimals)
 }
 
 export function formatAmount(raw: bigint | string, decimals: number, maxDecimals: number = decimals): string {
   try {
     const v = typeof raw === 'string' ? BigInt(raw) : raw
-    const out = ethers.formatUnits(v, decimals)
+  const out = formatUnits(v, decimals)
     if (maxDecimals < decimals) {
       const [w, d = ''] = out.split('.')
       if (!d) return w

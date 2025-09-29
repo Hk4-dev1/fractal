@@ -2,20 +2,21 @@
 // Seed ETH-native AMM (ETH <-> USDC) liquidity on ARB/OP/BASE
 import dotenv from 'dotenv'
 import path from 'path'
-import { ethers } from 'ethers'
+import { createPublicClient, createWalletClient, http, parseUnits, parseAbi, formatEther, getAddress } from 'viem'
+import { privateKeyToAccount } from 'viem/accounts'
 dotenv.config({ path: path.resolve(process.cwd(), '.env'), override: true })
 
-const ERC20_ABI = [
+const ERC20_ABI = parseAbi([
   'function balanceOf(address) view returns (uint256)',
   'function decimals() view returns (uint8)',
   'function approve(address spender, uint256 value) returns (bool)',
   'function allowance(address owner, address spender) view returns (uint256)',
   'function mint(address to, uint256 amount) returns (bool)'
-]
-const AMM_ETH_ABI = [
+])
+const AMM_ETH_ABI = parseAbi([
   'function getReserves() view returns (uint256 ethReserve, uint256 usdcReserve)',
-  'function addLiquidity(uint256 usdcAmount) payable',
-]
+  'function addLiquidity(uint256 usdcAmount) payable'
+])
 
 const CHAINS = {
   arbitrum: {
@@ -47,51 +48,53 @@ if (!PRIVATE_KEY || PRIVATE_KEY.length < 66) {
 
 async function seed(name, cfg) {
   console.log(`\n=== ${name.toUpperCase()} (${cfg.chainId}) ===`)
-  const provider = new ethers.JsonRpcProvider(cfg.rpc)
-  const wallet = new ethers.Wallet(PRIVATE_KEY, provider)
-  const me = await wallet.getAddress()
+  const account = privateKeyToAccount(PRIVATE_KEY)
+  const chain = { id: cfg.chainId, name, network: name, nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: [cfg.rpc] } } }
+  const publicClient = createPublicClient({ chain, transport: http(cfg.rpc) })
+  const walletClient = createWalletClient({ account, chain, transport: http(cfg.rpc) })
+  const me = account.address
   console.log('Account:', me)
 
-  const amm = new ethers.Contract(cfg.amm, AMM_ETH_ABI, wallet)
-  const usdc = new ethers.Contract(cfg.usdc, ERC20_ABI, wallet)
-
-  // Check AMM code exists
-  const code = await provider.getCode(cfg.amm)
+  // Bytecode sanity
+  const code = await publicClient.getBytecode({ address: cfg.amm })
   if (!code || code === '0x') throw new Error(`AMM not found at ${cfg.amm}`)
 
+  async function read(addr, abi, fn, args=[]) { return publicClient.readContract({ address: addr, abi, functionName: fn, args }) }
+
   // Prepare amounts
-  const ethAmt = ethers.parseEther(process.env.SEED_ETH || '0.05')
-  const usdcAmt = ethers.parseUnits(process.env.SEED_USDC || '150', 6)
+  const ethAmt = parseUnits(process.env.SEED_ETH || '0.05', 18)
+  const usdcAmt = parseUnits(process.env.SEED_USDC || '150', 6)
 
   // Ensure USDC balance; try mint
-  let usdcBal = await usdc.balanceOf(me)
+  let usdcBal = await read(cfg.usdc, ERC20_ABI, 'balanceOf', [me])
   if (usdcBal < usdcAmt) {
     console.log('Trying to mint USDC (Mock)...')
     try {
-      const tx = await usdc.mint(me, usdcAmt - usdcBal)
-      await tx.wait()
-      usdcBal = await usdc.balanceOf(me)
-      console.log('USDC minted, balance:', ethers.formatUnits(usdcBal, 6))
+      const hash = await walletClient.writeContract({ address: cfg.usdc, abi: ERC20_ABI, functionName: 'mint', args: [me, usdcAmt - usdcBal] })
+      await publicClient.waitForTransactionReceipt({ hash })
+      usdcBal = await read(cfg.usdc, ERC20_ABI, 'balanceOf', [me])
+      console.log('USDC minted, balance:', Number(usdcBal) / 1e6)
     } catch {
       console.log('Mint failed. Please fund USDC manually if needed.')
     }
   }
 
   // Approve USDC for AMM
-  const allowance = await usdc.allowance(me, cfg.amm).catch(() => 0n)
+  const allowance = await read(cfg.usdc, ERC20_ABI, 'allowance', [me, cfg.amm]).catch(() => 0n)
   if (allowance < usdcAmt) {
     console.log('Approving USDC...')
-    await (await usdc.approve(cfg.amm, usdcAmt)).wait()
+    const hash = await walletClient.writeContract({ address: cfg.usdc, abi: ERC20_ABI, functionName: 'approve', args: [cfg.amm, usdcAmt] })
+    await publicClient.waitForTransactionReceipt({ hash })
   }
 
   // Add liquidity
   try {
-    const reserves = await amm.getReserves().catch(() => null)
-    console.log('Current reserves:', reserves)
-    console.log('Adding liquidity (ETH, USDC):', ethers.formatEther(ethAmt), Number(ethers.formatUnits(usdcAmt, 6)))
-    const tx = await amm.addLiquidity(usdcAmt, { value: ethAmt })
-    const rc = await tx.wait()
-    console.log('Liquidity added. tx:', rc?.hash)
+  const reserves = await publicClient.readContract({ address: cfg.amm, abi: AMM_ETH_ABI, functionName: 'getReserves' }).catch(() => null)
+  console.log('Current reserves:', reserves)
+  console.log('Adding liquidity (ETH, USDC):', formatEther(ethAmt), Number(usdcAmt) / 1e6)
+  const hash = await walletClient.writeContract({ address: cfg.amm, abi: AMM_ETH_ABI, functionName: 'addLiquidity', args: [usdcAmt], value: ethAmt })
+  await publicClient.waitForTransactionReceipt({ hash })
+  console.log('Liquidity added. tx:', hash)
   } catch (e) {
     console.error('addLiquidity failed:', e?.shortMessage || e?.message || e)
     throw e

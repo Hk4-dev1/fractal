@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ethers } from 'ethers';
+import { createPublicClient, http } from 'viem';
 import { WIRING_ENTRIES, LZV2_ENDPOINT } from '../services/wiring-config';
 
 type Row = {
@@ -21,25 +21,46 @@ export function Health() {
       setLoading(true);
       const out: Row[] = [];
       try {
-        for (const e of WIRING_ENTRIES) {
-          const envRpc = (import.meta as any).env?.[e.rpcEnv] as string | undefined;
-          const rpc = envRpc && envRpc.trim().length > 0 ? envRpc : (e as any).defaultRpc;
-          const provider = new ethers.JsonRpcProvider(rpc);
-          const routerAbi = ["function endpoint() view returns (address)", "function peers(uint64) view returns (bytes32)"];
-          const escrowAbi = ["function router() view returns (address)"];
-          const router = new ethers.Contract(e.router, routerAbi, provider);
-          const endpoint = await router.endpoint();
-          const endpointOk = endpoint.toLowerCase() === LZV2_ENDPOINT.toLowerCase();
-          let escrowRouterOk: boolean | undefined = undefined;
+        // Minimal viem ABIs for the two read calls we need.
+        const routerAbi = [
+          { name: 'endpoint', type: 'function', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] }
+        ] as const;
+        const escrowAbi = [
+          { name: 'router', type: 'function', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] }
+        ] as const;
+
+    for (const e of WIRING_ENTRIES) {
           try {
-            const escrow = new ethers.Contract(e.escrow, escrowAbi, provider);
-            const cur = await escrow.router();
-            escrowRouterOk = cur.toLowerCase() === e.router.toLowerCase();
-          } catch {}
-          out.push({ name: e.name, router: e.router, endpointOk, escrowRouterOk });
+      const envAny = import.meta as unknown as { env?: Record<string, string | undefined> };
+      const envRpc = envAny.env?.[e.rpcEnv] as string | undefined;
+      const rpc = envRpc && envRpc.trim().length > 0 ? envRpc : e.defaultRpc;
+            // Create an ephemeral public client per RPC (fast & lightweight for a few calls).
+            const client = createPublicClient({ transport: http(rpc) });
+            const endpoint = await client.readContract({
+              address: e.router as `0x${string}`,
+              abi: routerAbi,
+              functionName: 'endpoint'
+            });
+            const endpointOk = endpoint.toLowerCase() === LZV2_ENDPOINT.toLowerCase();
+            let escrowRouterOk: boolean | undefined = undefined;
+            try {
+              const cur = await client.readContract({
+                address: e.escrow as `0x${string}`,
+                abi: escrowAbi,
+                functionName: 'router'
+              });
+              escrowRouterOk = cur.toLowerCase() === e.router.toLowerCase();
+            } catch {
+              // missing escrow or read error
+            }
+            out.push({ name: e.name, router: e.router, endpointOk, escrowRouterOk });
+          } catch (innerErr) {
+            const msg = innerErr instanceof Error ? innerErr.message : String(innerErr);
+            out.push({ name: e.name, router: e.router, endpointOk: false, error: msg });
+          }
         }
-      } catch (err: any) {
-        console.error(err);
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : err);
       } finally {
         if (!cancelled) {
           setRows(out);

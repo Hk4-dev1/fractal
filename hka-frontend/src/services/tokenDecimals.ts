@@ -1,7 +1,7 @@
-import { Contract, JsonRpcProvider } from 'ethers'
-import { getCachedProvider } from './providerCache'
+import { getViemClient } from './providerCache'
+import { parseAbi, getAddress } from 'viem'
+// Minimal chain id -> rpc mapping derived from providers cache (fallback); we reuse getCachedProvider for URL.
 
-const ERC20_ABI = [ 'function decimals() view returns (uint8)' ]
 
 // cache key: chainId|address(lower)
 const DECIMAL_CACHE = new Map<string, number>()
@@ -11,17 +11,19 @@ export async function getTokenDecimals(chainId: number, address: string): Promis
   const key = `${chainId}|${address.toLowerCase()}`
   const hit = DECIMAL_CACHE.get(key)
   if (hit !== undefined) return hit
-  const provider: JsonRpcProvider = await getCachedProvider(chainId)
-  const erc20 = new Contract(address, ERC20_ABI, provider)
+  const client = getViemClient(chainId)
   try {
-    const dec: bigint | number = await erc20.decimals()
+    const dec = await client.readContract({ address: getAddress(address), abi: parseAbi(['function decimals() view returns (uint8)']), functionName: 'decimals' }) as unknown as number | bigint
     const num = typeof dec === 'bigint' ? Number(dec) : dec
-    DECIMAL_CACHE.set(key, num)
-    return num
+    if (Number.isFinite(num) && num > 0 && num < 255) {
+      DECIMAL_CACHE.set(key, num)
+      return num
+    }
   } catch {
-    DECIMAL_CACHE.set(key, 18)
-    return 18
+    // ignore
   }
+  DECIMAL_CACHE.set(key, 18)
+  return 18
 }
 
 export function primeTokenDecimals(chainId: number, entries: Array<{ address: string; decimals: number }>) {

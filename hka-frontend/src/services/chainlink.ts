@@ -1,5 +1,6 @@
-import { Contract, ethers } from 'ethers'
-import { getCachedProvider, withRetries } from './providerCache'
+import { formatUnits } from '../../services/viemAdapter'
+import { withRetries, getViemClient } from './providerCache'
+import { parseAbi } from 'viem'
 
 // Minimal Chainlink AggregatorV3Interface
 const AGG_ABI = [
@@ -18,32 +19,32 @@ const FEEDS: Partial<Record<number, `0x${string}`>> = {
 export async function getEthUsdPrice(chainId: number): Promise<{ price: string; decimals: number } | null> {
   // Always try Sepolia feed on Sepolia provider first for stability
   try {
-    const sepoliaProvider = getCachedProvider(11155111)
-    const aggSepolia = new Contract(SEPOLIA_ETH_USD, AGG_ABI, sepoliaProvider)
+    const abi = parseAbi(AGG_ABI)
+    const client = getViemClient(11155111)
     const [decRaw, latestRaw] = await withRetries(() => Promise.all([
-      aggSepolia.decimals(),
-      aggSepolia.latestRoundData(),
+      client.readContract({ address: SEPOLIA_ETH_USD, abi, functionName: 'decimals' }) as Promise<number | bigint>,
+  client.readContract({ address: SEPOLIA_ETH_USD, abi, functionName: 'latestRoundData' }) as Promise<readonly [bigint, bigint, bigint, bigint, bigint]>,
     ]))
-    const dec = Number(decRaw)
+    const dec = Number(typeof decRaw === 'bigint' ? Number(decRaw) : decRaw)
     const latest = latestRaw as readonly [bigint, bigint, bigint, bigint, bigint]
     const answer: bigint = latest[1]
-    const price = ethers.formatUnits(answer, dec)
+    const price = formatUnits(answer, dec)
     return { price, decimals: dec }
   } catch {
     // As a secondary attempt, if we have a known-good feed on the same chain, try it
     try {
       const feed = FEEDS[chainId]
       if (!feed) throw new Error('no per-chain feed')
-      const provider = getCachedProvider(chainId)
-      const agg = new Contract(feed, AGG_ABI, provider)
+      const abi = parseAbi(AGG_ABI)
+      const client = getViemClient(chainId)
       const [decRaw, latestRaw] = await withRetries(() => Promise.all([
-        agg.decimals(),
-        agg.latestRoundData(),
+        client.readContract({ address: feed, abi, functionName: 'decimals' }) as Promise<number | bigint>,
+        client.readContract({ address: feed, abi, functionName: 'latestRoundData' }) as Promise<readonly [bigint, bigint, bigint, bigint, bigint]>,
       ]))
-      const dec = Number(decRaw)
+      const dec = Number(typeof decRaw === 'bigint' ? Number(decRaw) : decRaw)
       const latest = latestRaw as readonly [bigint, bigint, bigint, bigint, bigint]
       const answer: bigint = latest[1]
-      const price = ethers.formatUnits(answer, dec)
+      const price = formatUnits(answer, dec)
       return { price, decimals: dec }
   } catch {
       return null

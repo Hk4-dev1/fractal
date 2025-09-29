@@ -1,17 +1,17 @@
-import { ethers } from 'ethers'
-import { ROUTERS, UI_TO_CHAINKEY, ESCROWS, type ChainKey } from '../config/chains'
+// Removed broad ethers usage; only need zero hash constant for peer checks
+const ZERO_HASH = '0x0000000000000000000000000000000000000000000000000000000000000000'
+// viem ABI encoder to replace ethers.AbiCoder for static payload encoding (migration step 1)
+import { encodeAbiParameters } from 'viem'
+import { ROUTERS, UI_TO_CHAINKEY, type ChainKey } from '../config/chains'
 import { buildLzV2OptionsLzReceiveGas } from '../utils/lzOptions'
 import CONTRACTS from '../../services/contracts'
-import { getCachedProvider, withRetries } from './providerCache'
+import type { ContractsEntry } from '../../types/contracts'
+import { getCachedProvider, withRetries, getViemClient } from './providerCache'
 
 // Minimal ABI for our OAppRouterV2 (as implemented in fractal-backend)
 // - quote(dstEid, payload, options) returns a struct (nativeFee, lzTokenFee)
 // - sendSwapMessage(dstEid, payload, options) payable
-const ROUTER_ABI = [
-  'function quote(uint32 dstEid, bytes payload, bytes options) view returns (uint256 nativeFee, uint256 lzTokenFee)',
-  'function sendSwapMessage(uint32 dstEid, bytes payload, bytes options) payable',
-  'function peers(uint32) view returns (bytes32)'
-]
+// NOTE: Removed ROUTER_ABI usage in favor of inline viem ABIs per call.
 
 type QuoteResult = {
   nativeFee: string
@@ -41,7 +41,7 @@ function getRouterAddress(chainKey: ChainKey): `0x${string}` {
 
 function getEid(chainKey: ChainKey): number {
   const chainId = CHAIN_IDS[chainKey]
-  const entry = (CONTRACTS as Record<number, { layerZeroEid?: number }>)[chainId]
+  const entry = (CONTRACTS as Record<number, Pick<ContractsEntry,'layerZeroEid'>>)[chainId]
   const eid = entry?.layerZeroEid
   if (!eid) throw new Error(`Missing LayerZero EID for ${chainKey}`)
   return eid as number
@@ -55,30 +55,42 @@ function encodePayload(params: {
   amount: bigint
 }): `0x${string}` {
   const { user = '0x0000000000000000000000000000000000000000', fromToken, toToken, amount } = params
-  const encoded = ethers.AbiCoder.defaultAbiCoder().encode(
-    ['address', 'string', 'string', 'uint256'],
-    [user, fromToken, toToken, amount],
+  // Replaced ethers.AbiCoder with viem encodeAbiParameters for tree-shakable ABI encoding.
+  const encoded = encodeAbiParameters(
+    [
+      { type: 'address' },
+      { type: 'string' },
+      { type: 'string' },
+      { type: 'uint256' },
+    ],
+    [user, fromToken, toToken, amount]
   )
   return encoded as `0x${string}`
 }
 
 // Encode the real execution payload expected by OAppRouterV2.lzReceive: (uint256 id, address to, uint256 minOut)
-function encodeExecutePayload(id: bigint, to: `0x${string}`, minOut: bigint): `0x${string}` {
-  const encoded = ethers.AbiCoder.defaultAbiCoder().encode(
-    ['uint256', 'address', 'uint256'],
-    [id, to, minOut],
-  )
-  return encoded as `0x${string}`
-}
+// (execute payload encoding now lives only in dynamic send module)
 
 async function quoteOnce(src: ChainKey, dst: ChainKey, payloadSizeHint?: `0x${string}`): Promise<QuoteResult> {
-  const provider = getCachedProvider(getChainId(src))
-  const router = new ethers.Contract(getRouterAddress(src), ROUTER_ABI, provider)
   const options = buildLzV2OptionsLzReceiveGas(250_000n)
   const message = payloadSizeHint ?? encodePayload({ fromToken: 'ETH', toToken: 'ETH', amount: 1n })
+  const client = getViemClient(getChainId(src))
   const [nativeFee, lzTokenFee] = await withRetries(
-    () => router.quote(getEid(dst), message, options),
-    // Bump timeout/retries to better tolerate testnet RPC slowness
+    () => client.readContract({
+      address: getRouterAddress(src),
+      abi: [
+        { type: 'function', name: 'quote', stateMutability: 'view', inputs: [
+          { name: 'dstEid', type: 'uint32' },
+          { name: 'payload', type: 'bytes' },
+          { name: 'options', type: 'bytes' },
+        ], outputs: [
+          { name: 'nativeFee', type: 'uint256' },
+          { name: 'lzTokenFee', type: 'uint256' }
+        ] }
+      ] as const,
+      functionName: 'quote',
+  args: [getEid(dst), message as `0x${string}`, options as `0x${string}`]
+    }) as Promise<[bigint, bigint]>,
     { timeoutMs: 7000, retries: 3 }
   )
   return { nativeFee: nativeFee.toString(), lzTokenFee: lzTokenFee.toString() }
@@ -175,13 +187,18 @@ export async function isRouteSupported(fromUi: 'ethereum' | 'arbitrum' | 'optimi
   }
   try {
     // First, optimistic readiness check: code+peer means route should be supported, even if quote times out.
-    const srcProvider = getCachedProvider(getChainId(from))
-    const router = new ethers.Contract(getRouterAddress(from), ROUTER_ABI, srcProvider)
-    const code = await srcProvider.getCode(getRouterAddress(from))
+  const srcClient = getCachedProvider(getChainId(from))
+  const code = await (srcClient as { transport: { request: (args: { method: string; params: unknown[] }) => Promise<string> } }).transport.request({ method: 'eth_getCode', params: [getRouterAddress(from), 'latest'] })
     const hasCode = !!code && code !== '0x'
     const dstEid = getEid(to)
-    const peer: string = await withRetries(() => router.peers(dstEid), { timeoutMs: 3000, retries: 1 })
-    const peerSet = peer && peer !== ethers.ZeroHash
+    const client = getViemClient(getChainId(from))
+    const peer = await withRetries(() => client.readContract({
+      address: getRouterAddress(from),
+      abi: [{ type: 'function', name: 'peers', stateMutability: 'view', inputs: [{ name: '', type: 'uint32' }], outputs: [{ type: 'bytes32' }] }] as const,
+      functionName: 'peers',
+      args: [dstEid]
+    }) as Promise<`0x${string}`>, { timeoutMs: 3000, retries: 1 })
+  const peerSet = peer && peer !== ZERO_HASH
     if (hasCode && peerSet) {
       ROUTE_HEALTH_CACHE.set(key, { ok: true, ts: now })
       return { ok: true }
@@ -195,13 +212,18 @@ export async function isRouteSupported(fromUi: 'ethereum' | 'arbitrum' | 'optimi
     const directMsg = (err?.shortMessage || err?.message || 'direct quote failed') as string
     // If direct failed, but router is deployed and peer is set, treat as supported
     try {
-      const srcProvider = getCachedProvider(getChainId(from))
-      const router = new ethers.Contract(getRouterAddress(from), ROUTER_ABI, srcProvider)
-      const code = await srcProvider.getCode(getRouterAddress(from))
+  const srcClient = getCachedProvider(getChainId(from))
+  const code = await (srcClient as { transport: { request: (args: { method: string; params: unknown[] }) => Promise<string> } }).transport.request({ method: 'eth_getCode', params: [getRouterAddress(from), 'latest'] })
       const hasCode = !!code && code !== '0x'
       const dstEid = getEid(to)
-      const peer: string = await withRetries(() => router.peers(dstEid), { timeoutMs: 3000, retries: 1 })
-      const peerSet = peer && peer !== ethers.ZeroHash
+      const client = getViemClient(getChainId(from))
+      const peer = await withRetries(() => client.readContract({
+        address: getRouterAddress(from),
+        abi: [{ type: 'function', name: 'peers', stateMutability: 'view', inputs: [{ name: '', type: 'uint32' }], outputs: [{ type: 'bytes32' }] }] as const,
+        functionName: 'peers',
+        args: [dstEid]
+      }) as Promise<`0x${string}`>, { timeoutMs: 3000, retries: 1 })
+  const peerSet = peer && peer !== ZERO_HASH
       if (hasCode && peerSet) {
         ROUTE_HEALTH_CACHE.set(key, { ok: true, ts: now })
         return { ok: true }
@@ -237,17 +259,21 @@ export async function isRouteSupported(fromUi: 'ethereum' | 'arbitrum' | 'optimi
       }
       // If legs failed, but routers are deployed and peers are set along both legs, treat as supported
       try {
-        const srcProvider = getCachedProvider(getChainId(from))
-        const hopProvider = getCachedProvider(getChainId(hop))
-        const srcRouter = new ethers.Contract(getRouterAddress(from), ROUTER_ABI, srcProvider)
-        const hopRouter = new ethers.Contract(getRouterAddress(hop), ROUTER_ABI, hopProvider)
-        const codeSrc = await srcProvider.getCode(getRouterAddress(from))
-        const codeHop = await hopProvider.getCode(getRouterAddress(hop))
+  const srcClientAgain = getCachedProvider(getChainId(from))
+  const hopClientCached = getCachedProvider(getChainId(hop))
+  const codeSrc = await (srcClientAgain as { transport: { request: (args: { method: string; params: unknown[] }) => Promise<string> } }).transport.request({ method: 'eth_getCode', params: [getRouterAddress(from), 'latest'] })
+  const codeHop = await (hopClientCached as { transport: { request: (args: { method: string; params: unknown[] }) => Promise<string> } }).transport.request({ method: 'eth_getCode', params: [getRouterAddress(hop), 'latest'] })
         const hasCodeSrc = !!codeSrc && codeSrc !== '0x'
         const hasCodeHop = !!codeHop && codeHop !== '0x'
-        const peerSrcToHop: string = await withRetries(() => srcRouter.peers(getEid(hop)), { timeoutMs: 3000, retries: 1 })
-        const peerHopToDst: string = await withRetries(() => hopRouter.peers(getEid(to)), { timeoutMs: 3000, retries: 1 })
-        const okPeers = peerSrcToHop && peerSrcToHop !== ethers.ZeroHash && peerHopToDst && peerHopToDst !== ethers.ZeroHash
+        const srcClient = getViemClient(getChainId(from))
+        const hopClient = getViemClient(getChainId(hop))
+        const peerSrcToHop = await withRetries(() => srcClient.readContract({
+          address: getRouterAddress(from), abi: [{ type: 'function', name: 'peers', stateMutability: 'view', inputs: [{ type: 'uint32' }], outputs: [{ type: 'bytes32' }] }] as const, functionName: 'peers', args: [getEid(hop)]
+        }) as Promise<`0x${string}`>, { timeoutMs: 3000, retries: 1 })
+        const peerHopToDst = await withRetries(() => hopClient.readContract({
+          address: getRouterAddress(hop), abi: [{ type: 'function', name: 'peers', stateMutability: 'view', inputs: [{ type: 'uint32' }], outputs: [{ type: 'bytes32' }] }] as const, functionName: 'peers', args: [getEid(to)]
+        }) as Promise<`0x${string}`>, { timeoutMs: 3000, retries: 1 })
+  const okPeers = peerSrcToHop && peerSrcToHop !== ZERO_HASH && peerHopToDst && peerHopToDst !== ZERO_HASH
         if (hasCodeSrc && hasCodeHop && okPeers) {
           ROUTE_HEALTH_CACHE.set(key, { ok: true, ts: now })
           return { ok: true }
@@ -265,167 +291,35 @@ export async function isRouteSupported(fromUi: 'ethereum' | 'arbitrum' | 'optimi
   }
 }
 
+import { formatUnits } from '../../services/viemAdapter'
+
 export function formatFeeWeiToEth(wei: string): string {
   try {
-    return Number(ethers.formatEther(wei)).toFixed(6)
+    const as = formatUnits(BigInt(wei), 18)
+    return Number(as).toFixed(6)
   } catch {
     return '0.000000'
   }
 }
 
 // --- Sending helpers ---
-async function switchWalletTo(chainKey: ChainKey) {
-  const chainId = CHAIN_IDS[chainKey]
-  const w = window as unknown as { ethereum?: { request: (args: { method: string; params?: unknown[] }) => Promise<unknown> } }
-  if (!w?.ethereum) throw new Error('Wallet not found')
-  try {
-    await w.ethereum.request({
-      method: 'wallet_switchEthereumChain',
-      params: [{ chainId: `0x${chainId.toString(16)}` }],
-    })
-  } catch (err: unknown) {
-    // If chain not added (4902), try to add using CONTRACTS rpc
-    const e = err as { code?: number }
-    if (e?.code === 4902) {
-      const entry = (CONTRACTS as Record<number, { name?: string; rpc?: string; explorer?: string }>)[chainId]
-  await w.ethereum.request({
-        method: 'wallet_addEthereumChain',
-        params: [{
-          chainId: `0x${chainId.toString(16)}`,
-          chainName: entry?.name || chainKey,
-          rpcUrls: [entry?.rpc],
-          nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
-          blockExplorerUrls: entry?.explorer ? [entry.explorer] : [],
-        }],
-      })
-    } else {
-      throw err
-    }
-  }
-}
+// Wallet switching & signing kept only in dynamic module.
 
-import type { Eip1193Provider } from 'ethers'
-
-async function getSignerOn(chainKey: ChainKey) {
-  await switchWalletTo(chainKey)
-  const w = window as unknown as { ethereum?: Eip1193Provider }
-  const provider = new ethers.BrowserProvider(w.ethereum as Eip1193Provider)
-  const signer = await provider.getSigner()
-  // Simple sanity: ensure network matches expected
-  const net = await provider.getNetwork()
-  const expected = BigInt(CHAIN_IDS[chainKey])
-  if (net.chainId !== expected) throw new Error(`Wrong network: ${net.chainId} != ${expected}`)
-  return { provider, signer }
-}
-
-// sendOnce() no longer used; dispatch is performed by EscrowCore to satisfy router authorization.
-
-export async function sendRoute(params: {
+// Lazy loaders for send/cancel to keep initial bundle free of signer logic
+export async function sendRouteLazy(params: {
   fromUiKey: 'ethereum' | 'arbitrum' | 'optimism' | 'base'
   toUiKey: 'ethereum' | 'arbitrum' | 'optimism' | 'base'
   fromToken: string
   toToken: string
   amount: bigint
   user?: `0x${string}`
-}): Promise<{ route: 'direct'; txHash: string; orderId: string } | { route: 'multihop'; leg1: string; leg2: string; orderId: string }> {
-  const from = UI_TO_CHAINKEY[params.fromUiKey]
-  const to = UI_TO_CHAINKEY[params.toUiKey]
-  // For fee estimation we use a size-hint payload elsewhere; here we prepare execution payload instead
-  // 1) Move funds into Escrow on source chain to avoid "0 amount" issues on-chain
-  // Minimal EscrowCore ABI
-  const ESCROW_ABI = [
-    'event OrderCreated(uint256 indexed id, address indexed maker, address tokenIn, address tokenOut, uint256 amountIn, uint256 minAmountOut, uint64 dstEid)',
-    'function nextOrderId() view returns (uint256)',
-    'function createOrder(address tokenIn,address tokenOut,uint256 amountIn,uint256 minAmountOut,uint64 dstEid) payable returns (uint256)'
-  ]
-  function resolveTokenAddress(chainId: number, symbol: string): `0x${string}` | null {
-    const entry = (CONTRACTS as Record<number, any>)[chainId]
-    if (!entry) return null
-    const s = symbol.toUpperCase()
-    if (s === 'ETH') return '0x0000000000000000000000000000000000000000'
-    if (s === 'WETH') return (entry.weth as `0x${string}`) || null
-    if (s === 'USDC') return (entry.testUSDC as `0x${string}`) || null
-    if (s === 'TESTETH') return (entry.testETH as `0x${string}`) || null
-    return null
-  }
-  async function createOrderOnEscrow(): Promise<bigint> {
-    const { signer } = await getSignerOn(from)
-    const chainId = getChainId(from)
-    const escrowAddr = ESCROWS[from]
-    const escrow = new ethers.Contract(escrowAddr, ESCROW_ABI, signer)
-    const iface = new ethers.Interface(ESCROW_ABI)
-    const tokenInAddr = resolveTokenAddress(chainId, params.fromToken)
-    const tokenOutAddr = resolveTokenAddress(getChainId(to), params.toToken) || '0x0000000000000000000000000000000000000000'
-    const minOut = 0n // UI already enforces slippage; on-chain min set to 0 for demo
-    if (!tokenInAddr) throw new Error(`Unknown token ${params.fromToken} on ${from}`)
-    // If ERC20, ensure allowance and then call createOrder without value
-    if (tokenInAddr !== '0x0000000000000000000000000000000000000000') {
-      const erc20 = new ethers.Contract(tokenInAddr, ['function allowance(address,address) view returns (uint256)','function approve(address,uint256) returns (bool)'], signer)
-      const owner = await signer.getAddress()
-      const allowance: bigint = await erc20.allowance(owner, escrowAddr)
-      if (allowance < params.amount) {
-        const txa = await erc20.approve(escrowAddr, params.amount)
-        await txa.wait()
-      }
-      const tx = await escrow.createOrder(tokenInAddr, tokenOutAddr, params.amount, minOut, BigInt(getEid(to)))
-      const rec = await tx.wait()
-      // Parse OrderCreated(id, maker, ...)
-      for (const lg of rec.logs) {
-        if (lg.address.toLowerCase() !== escrowAddr.toLowerCase()) continue
-        try {
-          const parsed = iface.parseLog(lg)
-          if (parsed?.name === 'OrderCreated') {
-            return parsed.args.id as bigint
-          }
-        } catch { /* skip non-matching logs */ }
-      }
-    } else {
-      // Native ETH: pass amount as msg.value
-      const tx = await escrow.createOrder(tokenInAddr, tokenOutAddr, params.amount, minOut, BigInt(getEid(to)), { value: params.amount })
-      const rec = await tx.wait()
-      for (const lg of rec.logs) {
-        if (lg.address.toLowerCase() !== escrowAddr.toLowerCase()) continue
-        try {
-          const parsed = iface.parseLog(lg)
-          if (parsed?.name === 'OrderCreated') {
-            return parsed.args.id as bigint
-          }
-        } catch { /* skip */ }
-      }
-    }
-    // Fallback: nextOrderId - 1 (should rarely be needed)
-    const next: bigint = await escrow.nextOrderId()
-    return next - 1n
-  }
-  // Create order first to actually move the user's funds into escrow on source and get its id
-  const orderId = await createOrderOnEscrow()
-  const { signer } = await getSignerOn(from)
-  const recipient = (params.user as `0x${string}`) || (await signer.getAddress() as `0x${string}`)
-  // Encode options (Type-3 gas) matching our Router usage
-  const options = buildLzV2OptionsLzReceiveGas(250_000n)
-  // Call escrow.dispatchToDst so msg.sender == escrow when router.sendSwapMessage is executed
-  const escrowAddr = ESCROWS[from]
-  const escrow = new ethers.Contract(escrowAddr, [
-    'function dispatchToDst(uint256 id,address to,uint256 minAmountOut,bytes options) payable'
-  ], signer)
-  // Fresh fee quote for the route (native fee) to supply as msg.value
-  const router = new ethers.Contract(getRouterAddress(from), ROUTER_ABI, signer)
-  const [nativeFee] = await router.quote(getEid(to), encodeExecutePayload(orderId, recipient, 0n), options)
-  const tx = await escrow.dispatchToDst(orderId, recipient, 0n, options, { value: nativeFee })
-  const rec = await tx.wait()
-  return { route: 'direct', txHash: rec.hash, orderId: orderId.toString() }
+  minOut?: bigint
+  debug?: (info: { attempt: number; phase: 'quote' | 'simulate' | 'send' | 'error' | 'done'; feeWei: bigint; optionsGas: bigint; message?: string }) => void
+}) {
+  const mod = await import('./crosschainSend')
+  return mod.sendRoute(params)
 }
-
-// Allow user to cancel a pending order on the source chain (refunds net amount; fees already routed)
-export async function cancelOrder(params: {
-  fromUiKey: 'ethereum' | 'arbitrum' | 'optimism' | 'base'
-  orderId: bigint
-}): Promise<string> {
-  const from = UI_TO_CHAINKEY[params.fromUiKey]
-  const { signer } = await getSignerOn(from)
-  const escrowAddr = ESCROWS[from]
-  const escrow = new ethers.Contract(escrowAddr, ['function cancelOrder(uint256 id)'], signer)
-  const tx = await escrow.cancelOrder(params.orderId)
-  const rec = await tx.wait()
-  return rec.hash
+export async function cancelOrderLazy(params: { fromUiKey: 'ethereum' | 'arbitrum' | 'optimism' | 'base'; orderId: bigint }) {
+  const mod = await import('./crosschainSend')
+  return mod.cancelOrder(params)
 }

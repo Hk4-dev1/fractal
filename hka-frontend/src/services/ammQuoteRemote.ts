@@ -1,6 +1,8 @@
-import { ethers, Contract } from 'ethers'
+import { parseUnits, formatUnits } from '../../services/viemAdapter'
 import CONTRACTS from '../../services/contracts'
-import { getCachedProvider, withRetries } from './providerCache'
+import type { ContractsEntry } from '../../types/contracts'
+import { getCachedProvider, withRetries, getViemClient } from './providerCache'
+import { parseAbi } from 'viem'
 import { getDestinationReserves } from './destinationReserves'
 import { getTokenDecimals } from './tokenDecimals'
 
@@ -12,9 +14,6 @@ const AMM_ABI = [
 ]
 
 
-type ContractsEntry = {
-  ammEngine: string; testUSDC: string; weth: string
-}
 
 function getTokenAddressOnChain(chainId: number, symbol: string): string {
   const c = (CONTRACTS as Record<number, ContractsEntry>)[chainId]
@@ -62,9 +61,10 @@ export async function getAmmQuoteOnChain(params: {
   if (hit && now - hit.ts < ttl) return hit.val
 
   const { chainId, tokenInSymbol, tokenOutSymbol, amountIn, subtractFeeBps = 0 } = params
-  const provider = getCachedProvider(chainId)
+  getCachedProvider(chainId) // touch cache (latency race) but not directly needed here
   const contracts = (CONTRACTS as Record<number, ContractsEntry>)[chainId]
-  const amm = new Contract(contracts.ammEngine, AMM_ABI, provider)
+  const abi = parseAbi(AMM_ABI)
+  const viemClient = getViemClient(chainId)
 
   // Determine token addresses for AMM (convert ETH->WETH for quote)
   const inSym = tokenInSymbol.toUpperCase() === 'ETH' ? 'WETH' : tokenInSymbol
@@ -74,19 +74,21 @@ export async function getAmmQuoteOnChain(params: {
 
   // Parse input using source token decimals
   const inDecimals = await resolveDecimals(chainId, inSym, tokenIn)
-  let amountInWei = ethers.parseUnits(amountIn, inDecimals)
+  let amountInWei = parseUnits(amountIn, inDecimals)
   if (subtractFeeBps > 0) {
     amountInWei = (amountInWei * BigInt(10000 - subtractFeeBps)) / 10000n
   }
 
   // Attempt primary path: structured getSwapQuote
   try {
-    const qres = await withRetries(() => amm.getSwapQuote(tokenIn, tokenOut, amountInWei))
+    const qres = await withRetries(async () => {
+      return await viemClient.readContract({ address: contracts.ammEngine as `0x${string}`, abi, functionName: 'getSwapQuote', args: [tokenIn as `0x${string}`, tokenOut as `0x${string}`, amountInWei] }) as readonly [bigint, bigint, bigint, bigint]
+    })
     // Tuple: (amountIn, amountOut, fee, priceImpact)
-    const tuple = qres as readonly [bigint, bigint, bigint, bigint]
+    const tuple = qres
     const rawOut = tuple[1]
     const outDecimals = await resolveDecimals(chainId, outSym, tokenOut)
-    const amountOut = ethers.formatUnits(rawOut, outDecimals)
+  const amountOut = formatUnits(rawOut, outDecimals)
     const priceImpactBps = Number(tuple[3])
     const priceImpactPercent = priceImpactBps / 10000
     const out = { amountOut, priceImpactPercent }
@@ -124,7 +126,7 @@ export async function getAmmQuoteOnChain(params: {
       }
       if (amountOutWei < 0n) amountOutWei = 0n
   const outDecimals = await resolveDecimals(chainId, outSym, tokenOut)
-      const amountOut = ethers.formatUnits(amountOutWei, outDecimals)
+  const amountOut = formatUnits(amountOutWei, outDecimals)
       // Improved price impact: compare execution price to mid price
       const reserveIn = isInEthLike ? rEth : rUsdc
       const reserveOut = isInEthLike ? rUsdc : rEth
@@ -141,6 +143,7 @@ export async function getAmmQuoteOnChain(params: {
       CACHE.set(cacheKey, { ts: now, val: out })
       return out
     } catch {
+      // rethrow original getSwapQuote error
       throw e
     }
   }

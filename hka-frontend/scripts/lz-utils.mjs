@@ -2,7 +2,8 @@
 import dotenv from 'dotenv'
 import path from 'path'
 dotenv.config({ path: path.resolve(process.cwd(), '.env'), override: true })
-import { ethers } from 'ethers'
+import { createPublicClient, createWalletClient, http, parseAbi, getAddress } from 'viem'
+import { privateKeyToAccount } from 'viem/accounts'
 
 // Chain definitions (keep in sync with app)
 const CHAINS = {
@@ -13,10 +14,10 @@ const CHAINS = {
   base: { key: 'base-sepolia', chainId: 84532, eid: 40245, oapp: '0x68bAB827101cD4C55d9994bc738f2ED8FfAB974F', rpcs: [process.env.RPC_BASE_SEPOLIA || 'https://sepolia.base.org', 'https://base-sepolia.blockpi.network/v1/rpc/public'] },
 }
 
-const OAPP_ABI = [
+const OAPP_ABI = parseAbi([
   'function peers(uint32) view returns (bytes32)',
-  'function setPeer(uint32 eid, bytes32 peer) external',
-]
+  'function setPeer(uint32 eid, bytes32 peer)'
+])
 
 function toPeerBytes32(addr) {
   const a = addr.toLowerCase().replace(/^0x/, '')
@@ -25,12 +26,13 @@ function toPeerBytes32(addr) {
   return '0x' + '0'.repeat(12 * 2) + a
 }
 
-async function getProvider(c) {
+async function getClient(c) {
   for (const url of c.rpcs) {
     try {
-      const p = new ethers.JsonRpcProvider(url)
-      await p.getBlockNumber()
-      return p
+      const chain = { id: c.chainId, name: c.key, network: c.key, nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: [url] } } }
+      const pc = createPublicClient({ chain, transport: http(url) })
+      await pc.getBlockNumber()
+      return { chain, publicClient: pc }
     } catch {}
   }
   throw new Error(`No healthy RPC for ${c.key}`)
@@ -39,14 +41,13 @@ async function getProvider(c) {
 export async function checkPeers() {
   const out = []
   for (const [ui, c] of Object.entries(CHAINS)) {
-    const prov = await getProvider(c)
-  const oapp = new ethers.Contract(c.oapp, OAPP_ABI, prov)
+    const { publicClient } = await getClient(c)
   const row = { ui, key: c.key, chainId: c.chainId, eid: c.eid, oapp: c.oapp, peers: {} }
     for (const [ui2, d] of Object.entries(CHAINS)) {
       if (ui2 === ui) continue
       try {
-    const peer = await oapp.peers(d.eid)
-        row.peers[ui2] = peer && peer !== ethers.ZeroHash ? peer : null
+        const peer = await publicClient.readContract({ address: c.oapp, abi: OAPP_ABI, functionName: 'peers', args: [d.eid] })
+        row.peers[ui2] = peer && peer !== '0x'.padEnd(66,'0') ? peer : null
       } catch (e) {
         row.peers[ui2] = null
       }
@@ -59,16 +60,16 @@ export async function checkPeers() {
 export async function setPeer({ from, to, pk }) {
   const src = CHAINS[from]; const dst = CHAINS[to]
   if (!src || !dst) throw new Error('Unknown chain alias')
-  const prov = await getProvider(src)
+  const { chain, publicClient } = await getClient(src)
   const raw = (pk || '').trim()
   const normPk = raw ? (raw.startsWith('0x') ? raw : `0x${raw}`) : ''
   if (!normPk || normPk.length < 66) throw new Error('Invalid PRIVATE_KEY')
-  const wallet = new ethers.Wallet(normPk, prov)
-  const oapp = new ethers.Contract(src.oapp, OAPP_ABI, wallet)
-  const peerAddr = dst.oapp
-  const tx = await oapp.setPeer(dst.eid, toPeerBytes32(peerAddr))
-  const rec = await tx.wait()
-  return rec?.hash
+  const account = privateKeyToAccount(normPk)
+  const walletClient = createWalletClient({ account, chain, transport: http(chain.rpcUrls.default.http[0]) })
+  const peerAddr = getAddress(dst.oapp)
+  const hash = await walletClient.writeContract({ address: src.oapp, abi: OAPP_ABI, functionName: 'setPeer', args: [dst.eid, toPeerBytes32(peerAddr)] })
+  await publicClient.waitForTransactionReceipt({ hash })
+  return hash
 }
 
 export function listChains() {

@@ -1,24 +1,32 @@
 #!/usr/bin/env node
+// Migrated from ethers -> viem
 import dotenv from 'dotenv'
 import path from 'path'
-import { ethers } from 'ethers'
+import { createPublicClient, createWalletClient, http, parseUnits, formatUnits } from 'viem'
+import { privateKeyToAccount } from 'viem/accounts'
 dotenv.config({ path: path.resolve(process.cwd(), '.env'), override: true })
 
+// Minimal ABIs in viem fragment form
 const AMM_ABI = [
-  'function swap(address _tokenIn, address _tokenOut, uint256 _amountIn, uint256 _minAmountOut) returns (uint256)'
+  { type: 'function', name: 'swap', stateMutability: 'nonpayable', inputs: [
+    { name: '_tokenIn', type: 'address' },
+    { name: '_tokenOut', type: 'address' },
+    { name: '_amountIn', type: 'uint256' },
+    { name: '_minAmountOut', type: 'uint256' }
+  ], outputs: [{ type: 'uint256' }] }
 ]
 const ERC20_ABI = [
-  'function balanceOf(address) view returns (uint256)',
-  'function decimals() view returns (uint8)',
-  'function approve(address spender, uint256 value) returns (bool)',
-  'function allowance(address owner, address spender) view returns (uint256)'
+  { type: 'function', name: 'balanceOf', stateMutability: 'view', inputs: [{ type: 'address' }], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'decimals', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint8' }] },
+  { type: 'function', name: 'approve', stateMutability: 'nonpayable', inputs: [{ type: 'address', name: 'spender' }, { type: 'uint256', name: 'value' }], outputs: [{ type: 'bool' }] },
+  { type: 'function', name: 'allowance', stateMutability: 'view', inputs: [{ type: 'address', name: 'owner' }, { type: 'address', name: 'spender' }], outputs: [{ type: 'uint256' }] }
 ]
 const WETH_ABI = [
-  'function deposit() payable',
-  'function balanceOf(address) view returns (uint256)',
-  'function approve(address spender, uint256 value) returns (bool)',
-  'function allowance(address owner, address spender) view returns (uint256)',
-  'function decimals() view returns (uint8)'
+  { type: 'function', name: 'deposit', stateMutability: 'payable', inputs: [], outputs: [] },
+  { type: 'function', name: 'balanceOf', stateMutability: 'view', inputs: [{ type: 'address' }], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'approve', stateMutability: 'nonpayable', inputs: [{ type: 'address', name: 'spender' }, { type: 'uint256', name: 'value' }], outputs: [{ type: 'bool' }] },
+  { type: 'function', name: 'allowance', stateMutability: 'view', inputs: [{ type: 'address', name: 'owner' }, { type: 'address', name: 'spender' }], outputs: [{ type: 'uint256' }] },
+  { type: 'function', name: 'decimals', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint8' }] }
 ]
 
 const CHAINS = {
@@ -29,8 +37,8 @@ const CHAINS = {
 
 const rawPk = (process.env.PRIVATE_KEY || '').trim()
 const PRIVATE_KEY = rawPk ? (rawPk.startsWith('0x') ? rawPk : `0x${rawPk}`) : ''
-if (!PRIVATE_KEY || PRIVATE_KEY.length < 66) {
-  console.error('Set PRIVATE_KEY in env (0x-prefixed or raw 64-hex)')
+if (!PRIVATE_KEY || PRIVATE_KEY.length !== 66) {
+  console.error('Set PRIVATE_KEY in env (0x-prefixed 64 hex)')
   process.exit(1)
 }
 
@@ -44,39 +52,41 @@ if (!CHAINS[target]) {
 async function main() {
   const cfg = CHAINS[target]
   console.log(`\n=== Swap on ${target.toUpperCase()} (${cfg.chainId}) ===`)
-  const provider = new ethers.JsonRpcProvider(cfg.rpc)
-  const wallet = new ethers.Wallet(PRIVATE_KEY, provider)
-  const me = await wallet.getAddress()
+  const chainObj = { id: cfg.chainId, name: target, nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: [cfg.rpc] }, public: { http: [cfg.rpc] } } }
+  const publicClient = createPublicClient({ chain: chainObj, transport: http(cfg.rpc) })
+  const account = privateKeyToAccount(PRIVATE_KEY)
+  const walletClient = createWalletClient({ account, chain: chainObj, transport: http(cfg.rpc) })
+  const me = account.address
   console.log('Account:', me)
 
-  const amm = new ethers.Contract(cfg.amm, AMM_ABI, wallet)
-  const weth = new ethers.Contract(cfg.weth, WETH_ABI, wallet)
-  const usdc = new ethers.Contract(cfg.usdc, ERC20_ABI, wallet)
+  async function readDec(addr) {
+    try { return await publicClient.readContract({ address: addr, abi: WETH_ABI, functionName: 'decimals' }) } catch { return 18 }
+  }
+  const wethDec = await readDec(cfg.weth)
+  const usdcDec = await (async () => { try { return await publicClient.readContract({ address: cfg.usdc, abi: ERC20_ABI, functionName: 'decimals' }) } catch { return 6 } })()
+  const amtIn = parseUnits(amountEth, 18)
 
-  const wethDec = await weth.decimals().catch(() => 18)
-  const usdcDec = await usdc.decimals().catch(() => 6)
-  const amtIn = ethers.parseUnits(amountEth, 18)
-
-  // Ensure WETH balance
-  const wBal = await weth.balanceOf(me)
+  // WETH balance check
+  const wBal = await publicClient.readContract({ address: cfg.weth, abi: WETH_ABI, functionName: 'balanceOf', args: [me] })
   if (wBal < amtIn) {
     const need = amtIn - wBal
-    console.log('Wrapping ETH -> WETH:', ethers.formatUnits(need, wethDec))
-    const tx = await weth.deposit({ value: need })
-    await tx.wait()
+    console.log('Wrapping ETH -> WETH:', formatUnits(need, wethDec))
+    const depositHash = await walletClient.writeContract({ address: cfg.weth, abi: WETH_ABI, functionName: 'deposit', value: need })
+    await publicClient.waitForTransactionReceipt({ hash: depositHash })
   }
 
-  // Approve AMM to spend WETH
-  const allowW = await weth.allowance(me, cfg.amm).catch(() => 0n)
+  // Allowance
+  const allowW = await publicClient.readContract({ address: cfg.weth, abi: WETH_ABI, functionName: 'allowance', args: [me, cfg.amm] })
   if (allowW < amtIn) {
     console.log('Approving WETH...')
-    await (await weth.approve(cfg.amm, amtIn)).wait()
+    const approveHash = await walletClient.writeContract({ address: cfg.weth, abi: WETH_ABI, functionName: 'approve', args: [cfg.amm, amtIn] })
+    await publicClient.waitForTransactionReceipt({ hash: approveHash })
   }
 
   console.log('Swapping WETH -> USDC:', amountEth)
-  const tx = await amm.swap(cfg.weth, cfg.usdc, amtIn, 0)
-  const rc = await tx.wait()
-  console.log('Swap tx:', rc?.hash)
+  const swapHash = await walletClient.writeContract({ address: cfg.amm, abi: AMM_ABI, functionName: 'swap', args: [cfg.weth, cfg.usdc, amtIn, 0n] })
+  const rc = await publicClient.waitForTransactionReceipt({ hash: swapHash })
+  console.log('Swap tx:', rc.transactionHash)
 }
 
 main().catch((e) => { console.error(e?.shortMessage || e?.message || e); process.exit(1) })

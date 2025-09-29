@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+// Dynamic framer-motion (lazy) – keeps heavy animation lib out of initial bundle
+import { motion, AnimatePresence, loadFramerMotion } from './fm';
 import { Button } from './ui/button';
 import { Card, CardContent } from './ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
@@ -11,8 +12,9 @@ import { useRealDEX } from '../hooks/useRealDEX';
 import { useWallet } from '../hooks/useWallet';
 import { NETWORKS } from '../services/contract-config';
 import { SwapQuote } from '../services/real-dex';
-import { ethers } from 'ethers';
-import { quoteRoute, sendRoute, formatFeeWeiToEth, isRouteSupported, cancelOrder } from '../src/services/crosschainRouter';
+import { parseUnits, formatUnits } from '../services/viemAdapter';
+import { quoteRoute, sendRouteLazy as sendRoute, formatFeeWeiToEth, isRouteSupported, cancelOrderLazy as cancelOrder } from '../src/services/crosschainRouter';
+import { getReceiptStatus, checkWiring, findDelivery } from '../src/services/ccStatus'
 import { getEthUsdPriceNumber } from '../src/services/chainlink';
 import { envHealthSummary } from '../src/services/envHealth';
 import { getExplorerUrl } from '../services/contracts';
@@ -28,6 +30,22 @@ const SLIPPAGE_OPTIONS = ['0.1', '0.5', '1.0', '3.0'];
 //
 
 export function SpotTradingNew() {
+  // Defer framer-motion load until first real interaction (pointer/focus/click)
+  const interactionArmedRef = useRef(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const fire = () => { if (!interactionArmedRef.current) { interactionArmedRef.current = true; loadFramerMotion(true); } };
+    const el = rootRef.current;
+    if (!el) return;
+    el.addEventListener('pointerenter', fire, { once: true, passive: true });
+    el.addEventListener('click', fire, { once: true });
+    el.addEventListener('focusin', fire, { once: true });
+    return () => {
+      el.removeEventListener('pointerenter', fire);
+      el.removeEventListener('click', fire);
+      el.removeEventListener('focusin', fire);
+    };
+  }, []);
   const { isConnected, networkName, chainId, switchNetwork, account, isSwitchingNetwork } = useWallet();
   const { 
     isLoadingBalances, 
@@ -50,6 +68,7 @@ export function SpotTradingNew() {
   const [slippage, setSlippage] = useState('0.5');
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [ccDebug, setCcDebug] = useState(false);
   type CrossQuoteExtras = {
     routeType?: 'direct' | 'multihop';
     lzNativeFeeWei?: string;
@@ -69,6 +88,10 @@ export function SpotTradingNew() {
   const [routeOk, setRouteOk] = useState(true);
   const [routeReason, setRouteReason] = useState<string | undefined>(undefined);
   const prefsLoadedRef = useRef(false);
+  // Cleanup status polling on unmount
+  useEffect(() => {
+    return () => { if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null } }
+  }, [])
   // Chainlink oracle state
   const [ethUsdPrice, setEthUsdPrice] = useState<number | null>(null);
   // Env health notice
@@ -77,6 +100,14 @@ export function SpotTradingNew() {
     | { type: 'direct'; txHash: string; fromChainId: number; toChainId: number; orderId: string }
     | { type: 'multihop'; leg1: string; leg2: string; fromChainId: number; hopChainId: number; toChainId: number; orderId: string };
   const [lastTxInfo, setLastTxInfo] = useState<SentTxInfo | null>(null);
+  const [ccStatus, setCcStatus] = useState<null | {
+    wiring?: { escrowRouterOk: boolean; routerPeerOk: boolean; routerEscrowOk: boolean | null }
+    source?: { status: 'pending' | 'confirmed' | 'failed'; blockNumber?: bigint }
+    delivery?: { delivered: boolean; txHash?: string }
+    error?: string
+  }>(null)
+  // Polling timer
+  const pollRef = useRef<number | null>(null)
   
   // Debug: log state changes
   useEffect(() => {
@@ -242,7 +273,7 @@ export function SpotTradingNew() {
   // const formatFeeFromWei = (wei: bigint, decimals: number) => ethers.formatUnits(wei, decimals);
   const computeWeiFee = (amountStr: string, bps: number, decimals: number) => {
     try {
-      const wei = ethers.parseUnits((amountStr || '0').replace(',', '.'), decimals);
+  const wei = parseUnits((amountStr || '0').replace(',', '.'), decimals);
       return (wei * BigInt(bps)) / 10_000n;
     } catch {
       return 0n;
@@ -475,7 +506,7 @@ export function SpotTradingNew() {
   // Use decimals-aware units for payload amount (fee quote sizing)
   const amtFromSym = (fromTokenData?.symbol || 'ETH').toUpperCase();
   const amtDecimals = amtFromSym === 'USDC' ? 6 : 18;
-  const amountWei = ethers.parseUnits(amtStr, amtDecimals);
+  const amountWei = parseUnits(amtStr, amtDecimals);
         const res = await quoteRoute({
           fromUiKey: fromUi,
           toUiKey: toUi,
@@ -496,13 +527,13 @@ export function SpotTradingNew() {
             const TOTAL_DEX_FEE_BPS = ESCROW_FEE_BPS + AMM_FEE_BPS + PROTOCOL_FEE_BPS; // 55 bps
             const fromSymUp = (fromTokenData?.symbol || 'ETH').toUpperCase();
             const decimals = fromSymUp === 'USDC' ? 6 : 18; // extend if supporting more tokens
-            const amountWei = ethers.parseUnits(amtStr, decimals);
+            const amountWei = parseUnits(amtStr, decimals);
             const feeDen = 10_000n;
             const netWei = (amountWei * (feeDen - BigInt(TOTAL_DEX_FEE_BPS))) / feeDen;
             const slippageBps = Math.round(parseFloat(slippage || '0') * 100);
             const minRecvWei = (netWei * (feeDen - BigInt(slippageBps))) / feeDen;
-            const netStr = ethers.formatUnits(netWei, decimals);
-            const minRecvStr = ethers.formatUnits(minRecvWei, decimals);
+            const netStr = formatUnits(netWei, decimals);
+            const minRecvStr = formatUnits(minRecvWei, decimals);
             setToAmount(netStr);
             setLastQuote({
               amountIn: amtStr,
@@ -580,7 +611,7 @@ export function SpotTradingNew() {
     } finally {
       setQuoteLoading(false);
     }
-  }, [fromAmount, fromToken, toToken, getSwapQuote, isCrossChain, fromChain, toChain, slippage, ethUsdPrice, routeOk, getTokenByAddress]);
+  }, [fromAmount, fromToken, toToken, getSwapQuote, isCrossChain, fromChain, toChain, slippage, ethUsdPrice, routeOk, getTokenByAddress, routeReason]);
 
   // Auto-quote with debounce and single-flight seq guard
   const quoteSeq = useRef(0);
@@ -627,27 +658,78 @@ export function SpotTradingNew() {
         const toTokenDataLocal = getTokenByAddress(toToken);
         const fromSymUp = (fromTokenData?.symbol || 'ETH').toUpperCase();
         const amtDecimals = fromSymUp === 'USDC' ? 6 : 18;
-        const amountWei = ethers.parseUnits(fromAmount, amtDecimals);
-        toast.loading('Sending cross-chain...', { id: 'cc-swap' });
+  const amountWei = parseUnits(fromAmount, amtDecimals);
+        // Compute slippage-protected minOut for destination token, and surface in toast
+        // Compute slippage-protected minOut for destination token
+        const toSymUp = (toTokenDataLocal?.symbol || 'USDC').toUpperCase();
+        const toDecimals = toSymUp === 'USDC' ? 6 : 18;
+        const minOutStr = lastQuote.minimumReceived || toAmount;
+        const minOutWei = parseUnits(minOutStr, toDecimals);
+        const minOutPretty = (() => {
+          const n = Number(minOutStr || '0');
+          return isFinite(n) ? n.toFixed(6) : minOutStr;
+        })();
+        toast.loading(`Sending cross-chain… Min receive: ${minOutPretty} ${toSymUp}`, { id: 'cc-swap' });
         const res = await sendRoute({
           fromUiKey: fromUi,
           toUiKey: toUi,
           fromToken: fromTokenData?.symbol || 'TOKEN',
           toToken: toTokenDataLocal?.symbol || 'TOKEN',
           amount: amountWei,
+          minOut: minOutWei,
+          debug: ccDebug ? (info) => { try { console.debug('[cc-debug]', info) } catch {} } : undefined,
         });
-        if ('txHash' in res) {
-          toast.success(`Direct sent: ${res.txHash.slice(0, 10)}...`, { id: 'cc-swap' });
-          setLastTxInfo({ type: 'direct', txHash: res.txHash, fromChainId: fromChain, toChainId: toChain, orderId: res.orderId });
-        } else {
-          toast.success(`Multihop sent: ${res.leg1.slice(0, 10)}…, ${res.leg2.slice(0, 10)}…`, { id: 'cc-swap' });
-          // Hop is Ethereum Sepolia for multihop
-          setLastTxInfo({ type: 'multihop', leg1: res.leg1, leg2: res.leg2, fromChainId: fromChain, hopChainId: 11155111, toChainId: toChain, orderId: res.orderId });
+  toast.success(`Sent (min ${minOutPretty} ${toSymUp} protected): ${res.txHash.slice(0, 10)}…`, { id: 'cc-swap' });
+  setLastTxInfo({ type: 'direct', txHash: res.txHash, fromChainId: fromChain, toChainId: toChain, orderId: res.orderId });
+        // Kick off status polling
+        try {
+          setCcStatus({})
+          // 1) wiring
+          const wiring = await checkWiring({ fromUiKey: chainIdToUiKey(fromChain), toUiKey: chainIdToUiKey(toChain) })
+          setCcStatus(s => ({ ...(s||{}), wiring }))
+          // 2) source receipt + 3) delivery polling
+          const start = Date.now()
+          const doPoll = async () => {
+            try {
+              const source = await getReceiptStatus({ chainId: fromChain, txHash: res.txHash as `0x${string}` })
+              setCcStatus(s => ({ ...(s||{}), source }))
+              if (source.status === 'confirmed') {
+                const me = account as `0x${string}`
+                const delivery = await findDelivery({ toUiKey: chainIdToUiKey(toChain), recipient: me, minBlock: source.blockNumber, maxLookbackBlocks: 7000n })
+                if (delivery.delivered) {
+                  setCcStatus(s => ({ ...(s||{}), delivery: { delivered: true, txHash: delivery.matchedLog?.txHash } }))
+                  if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null }
+                  return
+                }
+              }
+              if (Date.now() - start > 7 * 60 * 1000) { // stop after ~7 minutes
+                if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null }
+                return
+              }
+            } catch (e: unknown) {
+              const msg = e instanceof Error ? e.message : String(e);
+              setCcStatus(s => ({ ...(s||{}), error: msg }))
+            }
+          }
+          await doPoll()
+          if (pollRef.current) window.clearInterval(pollRef.current)
+          pollRef.current = window.setInterval(doPoll, 5000)
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          setCcStatus({ error: msg })
         }
         setFromAmount('');
         setToAmount('');
         setLastQuote(null);
       } else {
+        // Same-chain: surface minOut in toast too
+        const toSymUp = (getTokenByAddress(toToken)?.symbol || 'TOKEN').toUpperCase();
+        const minOutStr = lastQuote.minimumReceived || toAmount;
+        const minOutPretty = (() => {
+          const n = Number(minOutStr || '0');
+          return isFinite(n) ? n.toFixed(6) : minOutStr;
+        })();
+        toast.loading(`Swapping… Min receive: ${minOutPretty} ${toSymUp}`, { id: 'sc-swap' });
         const txHash = await executeSwap(
           fromToken,
           toToken,
@@ -655,6 +737,7 @@ export function SpotTradingNew() {
           lastQuote.minimumReceived
         );
         if (txHash) {
+          toast.success(`Swap sent (min ${minOutPretty} ${toSymUp} protected): ${txHash.slice(0,10)}…`, { id: 'sc-swap' });
           setFromAmount('');
           setToAmount('');
           setLastQuote(null);
@@ -662,6 +745,8 @@ export function SpotTradingNew() {
       }
     } catch (error) {
       console.error('Swap error:', error);
+  const message = (error as Error)?.message || 'Swap failed';
+  toast.error(message);
     }
   };
 
@@ -772,7 +857,7 @@ export function SpotTradingNew() {
   }
 
   return (
-    <div className="space-y-3">
+    <div ref={rootRef} className="space-y-3">
   {/* 1inch-style minimalist header */}
   <motion.div className="flex items-center justify-between" initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.18 }}>
         <h2 className="text-xl font-semibold">Swap</h2>
@@ -813,6 +898,40 @@ export function SpotTradingNew() {
         </motion.div>
       )}
 
+      {/* Cross-chain Transparency Panel */}
+      {isCrossChain && lastTxInfo && lastTxInfo.type==='direct' && (
+        <div className="mt-3 p-3 rounded border text-xs bg-muted/30">
+          <div className="font-medium mb-1">Cross-chain status</div>
+          <div className="grid grid-cols-1 gap-1">
+            <div>
+              <span className="text-muted-foreground">Wiring:</span>{' '}
+              {ccStatus?.wiring ? (
+                <span>
+                  escrow.router {ccStatus.wiring.escrowRouterOk ? '✅' : '❌'} ·
+                  peer(dst) {ccStatus.wiring.routerPeerOk ? '✅' : '❌'} ·
+                  router.escrow {ccStatus.wiring.routerEscrowOk === null ? 'n/a' : (ccStatus.wiring.routerEscrowOk ? '✅' : '❌')}
+                </span>
+              ) : 'checking…'}
+            </div>
+            <div>
+              <span className="text-muted-foreground">Source tx:</span>{' '}
+              {ccStatus?.source ? (
+                <span>{ccStatus.source.status}{ccStatus.source.blockNumber ? ` @#${ccStatus.source.blockNumber}` : ''}</span>
+              ) : 'pending…'}
+            </div>
+            <div>
+              <span className="text-muted-foreground">Delivery:</span>{' '}
+              {ccStatus?.delivery?.delivered ? (
+                <a className="underline" target="_blank" rel="noreferrer" href={getExplorerUrl(toChain, ccStatus.delivery.txHash!)}>delivered (view)</a>
+              ) : 'waiting…'}
+            </div>
+            {ccStatus?.error && (
+              <div className="text-amber-700">{ccStatus.error}</div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Settings Panel */}
       {showSettings && (
         <Card>
@@ -844,6 +963,17 @@ export function SpotTradingNew() {
                       {option}%
                     </Button>
                   ))}
+                </div>
+              </div>
+
+              {/* Developer */}
+              <div className="pt-2 border-t">
+                <p className="text-sm font-medium mb-2">Developer</p>
+                <div className="flex items-center gap-2 text-xs">
+                  <Button variant={ccDebug ? 'default' : 'outline'} size="sm" onClick={() => setCcDebug(v => !v)}>
+                    {ccDebug ? 'Disable' : 'Enable'} cross-chain debug
+                  </Button>
+                  <span className="text-muted-foreground">Logs fee bumps and options gas per attempt</span>
                 </div>
               </div>
             </div>
@@ -1076,7 +1206,7 @@ export function SpotTradingNew() {
                       const sym = (getTokenByAddress(fromToken)?.symbol || '').toUpperCase();
                       const d = sym === 'USDC' ? 6 : 18;
                       const totalWei = isCrossChain ? totalDexFeeWeiCrossChain : totalDexFeeWeiSameChain;
-                      const totalStr = ethers.formatUnits(totalWei, d);
+                      const totalStr = formatUnits(totalWei, d);
                       const dexFeeNum = Number(totalStr);
                       const lzEth = Number(formatFeeWeiToEth(lastQuote.lzNativeFeeWei || '0'));
                       const dexFeeUsd = sym === 'USDC' ? dexFeeNum : (ethUsdPrice ? dexFeeNum * ethUsdPrice : null);
@@ -1153,20 +1283,20 @@ export function SpotTradingNew() {
                                     <div className="flex items-center justify-between">
                                       <span>Total DEX fee</span>
                                       <span>
-                                        {ethers.formatUnits(totalDexFeeWeiCrossChain, d)} {sym} (0.55%)
+                                        {formatUnits(totalDexFeeWeiCrossChain, d)} {sym} (0.55%)
                                       </span>
                                     </div>
                                     <div className="flex items-center justify-between">
                                       <span>Breakdown · AMM</span>
-                                      <span>{ethers.formatUnits(ammFeeWei, d)} {sym} (0.20%)</span>
+                                      <span>{formatUnits(ammFeeWei, d)} {sym} (0.20%)</span>
                                     </div>
                                     <div className="flex items-center justify-between">
                                       <span>Breakdown · Escrow</span>
-                                      <span>{ethers.formatUnits(escrowFeeWei, d)} {sym} (0.30%)</span>
+                                      <span>{formatUnits(escrowFeeWei, d)} {sym} (0.30%)</span>
                                     </div>
                                     <div className="flex items-center justify-between">
                                       <span>Breakdown · Protocol</span>
-                                      <span>{ethers.formatUnits(protocolFeeWei, d)} {sym} (0.05%)</span>
+                                      <span>{formatUnits(protocolFeeWei, d)} {sym} (0.05%)</span>
                                     </div>
                                   </>
                                 );
@@ -1281,7 +1411,7 @@ export function SpotTradingNew() {
                         {(() => {
                           const sym = (getTokenByAddress(fromToken)?.symbol || '').toUpperCase();
                           const d = sym === 'USDC' ? 6 : 18;
-                          const totalStr = ethers.formatUnits(totalDexFeeWeiSameChain, d);
+                          const totalStr = formatUnits(totalDexFeeWeiSameChain, d);
                           const totalNum = Number(totalStr);
                           const usd = sym === 'USDC' ? totalNum : (ethUsdPrice ? totalNum * ethUsdPrice : null);
                           return (
@@ -1295,13 +1425,13 @@ export function SpotTradingNew() {
                               <div className="flex items-center justify-between">
                                 <span>Breakdown · AMM</span>
                                 <span>
-                                  {(() => { const v = Number(ethers.formatUnits(ammFeeWei, d)); const u = sym==='USDC'?v:(ethUsdPrice? v*ethUsdPrice:null); return `${v.toFixed(6)} ${sym} (0.20%)${u?` (~$${u.toFixed(2)})`:''}`; })()}
+                                  {(() => { const v = Number(formatUnits(ammFeeWei, d)); const u = sym==='USDC'?v:(ethUsdPrice? v*ethUsdPrice:null); return `${v.toFixed(6)} ${sym} (0.20%)${u?` (~$${u.toFixed(2)})`:''}`; })()}
                                 </span>
                               </div>
                               <div className="flex items-center justify-between">
                                 <span>Breakdown · Protocol</span>
                                 <span>
-                                  {(() => { const v = Number(ethers.formatUnits(protocolFeeWei, d)); const u = sym==='USDC'?v:(ethUsdPrice? v*ethUsdPrice:null); return `${v.toFixed(6)} ${sym} (0.05%)${u?` (~$${u.toFixed(2)})`:''}`; })()}
+                                  {(() => { const v = Number(formatUnits(protocolFeeWei, d)); const u = sym==='USDC'?v:(ethUsdPrice? v*ethUsdPrice:null); return `${v.toFixed(6)} ${sym} (0.05%)${u?` (~$${u.toFixed(2)})`:''}`; })()}
                                 </span>
                               </div>
                             </>

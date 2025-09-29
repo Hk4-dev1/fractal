@@ -94,7 +94,15 @@ export const useWallet = () => {
     try {
       await walletService.connect();
     } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to connect wallet';
+      let errorMessage = error instanceof Error ? error.message : 'Failed to connect wallet';
+      // Common MetaMask cases
+      if (/already pending/i.test(errorMessage) || /-32002/.test(errorMessage)) {
+        errorMessage = 'Connection request already pending in MetaMask. Open the extension to continue.';
+      } else if (/timed out/i.test(errorMessage)) {
+        errorMessage = 'MetaMask prompt timed out. Click the MetaMask extension icon and approve the request.';
+      } else if (/not available/i.test(errorMessage)) {
+        errorMessage = 'MetaMask not available. Install the extension or open in MetaMask Mobile.';
+      }
       toast.error(errorMessage);
       throw error;
     }

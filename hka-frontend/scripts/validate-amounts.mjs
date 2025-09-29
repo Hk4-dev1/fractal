@@ -4,7 +4,7 @@
 // Usage: node scripts/validate-amounts.mjs
 // Exits non-zero if any check fails.
 
-import { parseUnits, formatUnits } from 'ethers';
+import { parseUnits, formatUnits } from 'viem';
 
 function parseAmount(amount, decimals) {
 	if (!amount || amount.trim() === '') return 0n;

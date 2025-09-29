@@ -1,14 +1,15 @@
 #!/usr/bin/env node
+// Migrated from ethers -> viem
 import dotenv from 'dotenv'
 import path from 'path'
-import { ethers } from 'ethers'
+import { createPublicClient, http, encodeFunctionData, parseUnits } from 'viem'
 dotenv.config({ path: path.resolve(process.cwd(), '.env'), override: true })
 
 const AMM_ABI = [
-  'function owner() view returns (address)',
-  'function getPool(address,address) view returns (tuple(address token0,address token1,uint256 reserve0,uint256 reserve1,uint256 totalSupply,uint256 lastUpdateTime,bool exists))',
-  'function setTokenSupport(address _token, bool _supported)',
-  'function createPool(address _token0, address _token1, uint256 _amount0, uint256 _amount1)'
+  { type: 'function', name: 'owner', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
+  { type: 'function', name: 'getPool', stateMutability: 'view', inputs: [{ type: 'address' }, { type: 'address' }], outputs: [{ type: 'address', name: 'token0' }, { type: 'address', name: 'token1' }, { type: 'uint256', name: 'reserve0' }, { type: 'uint256', name: 'reserve1' }, { type: 'uint256', name: 'totalSupply' }, { type: 'uint256', name: 'lastUpdateTime' }, { type: 'bool', name: 'exists' }] },
+  { type: 'function', name: 'setTokenSupport', stateMutability: 'nonpayable', inputs: [{ type: 'address', name: '_token' }, { type: 'bool', name: '_supported' }], outputs: [] },
+  { type: 'function', name: 'createPool', stateMutability: 'nonpayable', inputs: [{ type: 'address', name: '_token0' }, { type: 'address', name: '_token1' }, { type: 'uint256', name: '_amount0' }, { type: 'uint256', name: '_amount1' }], outputs: [] }
 ]
 
 const CHAINS = {
@@ -20,20 +21,19 @@ const CHAINS = {
 function sortPair(a, b) { return a.toLowerCase() < b.toLowerCase() ? [a, b] : [b, a] }
 
 async function main() {
-  const iface = new ethers.Interface(AMM_ABI)
+  // public client per chain when needed
   for (const [name, cfg] of Object.entries(CHAINS)) {
-    const provider = new ethers.JsonRpcProvider(cfg.rpc)
-    const amm = new ethers.Contract(cfg.amm, AMM_ABI, provider)
+    const client = createPublicClient({ chain: { id: cfg.chainId, name, nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: [cfg.rpc] }, public: { http: [cfg.rpc] } } }, transport: http(cfg.rpc) })
     const [t0, t1] = sortPair(cfg.weth, cfg.usdc)
-    const owner = await amm.owner().catch(() => '0x0000000000000000000000000000000000000000')
+    const owner = await client.readContract({ address: cfg.amm, abi: AMM_ABI, functionName: 'owner' }).catch(() => '0x0000000000000000000000000000000000000000')
     let pool
-    try { pool = await amm.getPool(t0, t1) } catch {}
+    try { pool = await client.readContract({ address: cfg.amm, abi: AMM_ABI, functionName: 'getPool', args: [t0, t1] }) } catch {}
     const exists = !!pool?.exists
     // Suggest default seed sizes: 0.5 WETH, 1500 USDC (decimals-aware)
     const wethDec = 18
     const usdcDec = 6
-    const seedWETH = ethers.parseUnits('0.5', wethDec)
-    const seedUSDC = ethers.parseUnits('1500', usdcDec)
+    const seedWETH = parseUnits('0.5', wethDec)
+    const seedUSDC = parseUnits('1500', usdcDec)
     const amt0 = t0.toLowerCase() === cfg.weth.toLowerCase() ? seedWETH : seedUSDC
     const amt1 = t1.toLowerCase() === cfg.usdc.toLowerCase() ? seedUSDC : seedWETH
     const data = {
@@ -49,9 +49,9 @@ async function main() {
       token1: t1,
       poolExists: exists,
       calldata: {
-        setSupportWETH: iface.encodeFunctionData('setTokenSupport', [cfg.weth, true]),
-        setSupportUSDC: iface.encodeFunctionData('setTokenSupport', [cfg.usdc, true]),
-        createPool: iface.encodeFunctionData('createPool', [t0, t1, amt0, amt1])
+        setSupportWETH: encodeFunctionData({ abi: AMM_ABI, functionName: 'setTokenSupport', args: [cfg.weth, true] }),
+        setSupportUSDC: encodeFunctionData({ abi: AMM_ABI, functionName: 'setTokenSupport', args: [cfg.usdc, true] }),
+        createPool: encodeFunctionData({ abi: AMM_ABI, functionName: 'createPool', args: [t0, t1, amt0, amt1] })
       }
     }
     console.log(JSON.stringify(data, null, 2))

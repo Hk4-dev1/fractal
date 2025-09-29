@@ -1,5 +1,5 @@
 #!/usr/bin/env ts-node
-import { formatUnits, parseUnits } from 'ethers'
+import { formatUnits, parseUnits } from 'viem'
 
 interface SimParams { inIsEth: boolean; amountIn: string; ethReserve: string; usdcReserve: string; feeBps: number }
 

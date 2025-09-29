@@ -1,7 +1,8 @@
 #!/usr/bin/env node
+// Migrated from ethers -> viem
 import dotenv from 'dotenv'
 import path from 'path'
-import { ethers } from 'ethers'
+import { createPublicClient, http } from 'viem'
 dotenv.config({ path: path.resolve(process.cwd(), '.env'), override: true })
 
 const AMM_ABI = [
@@ -27,11 +28,15 @@ async function main() {
   const out = {}
   for (const [name, cfg] of Object.entries(CHAINS)) {
     try {
-      const provider = new ethers.JsonRpcProvider(cfg.rpc)
-      const amm = new ethers.Contract(cfg.amm, AMM_ABI, provider)
-      const denom = await amm.FEE_DENOMINATOR().catch(() => 100000n)
-      const swapFee = await amm.swapFee()
-      const protocolFee = await amm.protocolFee()
+      const client = createPublicClient({ chain: { id: cfg.chainId, name: 'custom', nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 }, rpcUrls: { default: { http: [cfg.rpc] }, public: { http: [cfg.rpc] } } }, transport: http(cfg.rpc) })
+      const denom = await client.readContract({ address: cfg.amm, abi: AMM_ABI.map(sig => ({ type: 'function', name: sig.split('(')[0].trim(), stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] })), functionName: 'FEE_DENOMINATOR' }).catch(() => 100000n)
+      // Define minimal fragments explicitly for clarity
+      const feeAbi = [
+        { type: 'function', name: 'swapFee', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+        { type: 'function', name: 'protocolFee', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
+      ]
+      const swapFee = await client.readContract({ address: cfg.amm, abi: feeAbi, functionName: 'swapFee' })
+      const protocolFee = await client.readContract({ address: cfg.amm, abi: feeAbi, functionName: 'protocolFee' })
       out[name] = {
         chainId: cfg.chainId,
         amm: cfg.amm,

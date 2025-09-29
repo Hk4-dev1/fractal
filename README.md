@@ -65,6 +65,7 @@ Backend scripts:
 - cd fractal-backend
 - npm install
 - npx ts-node scripts/check-wiring.ts
+ - Append `--dry-run` to supported scripts (deploy-amm, deploy-escrow-router, wiring, prefund, smoke) to simulate without transactions.
 
 ## Security and secrets
 - No private keys are committed. Do not add them to the repo.
